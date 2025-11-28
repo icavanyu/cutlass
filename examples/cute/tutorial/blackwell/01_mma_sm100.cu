@@ -111,6 +111,7 @@ using namespace cute;
 // TypeD = float;            // MMA D Data Type
 // TypeAccumulator = float;  // Both TypeC and TypeD are float, so we use float accumulator type
 
+#define CUTLASS_ARCH_MMA_SM100_SUPPORTED
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
 // The shared memory buffers for A and B matrices.
@@ -389,6 +390,14 @@ void gemm_host_f16xf16_f32_f32_tnt(TypeA const* device_ptr_A, LayoutA layout_A,
   auto bN = tile_size<1>(tiled_mma);             // MMA Tile N. We'll use 1 MMAs per MMA Tile M.
   auto bK = tile_size<2>(tiled_mma) * Int<4>{};  // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For 16b types, tcgen05.mma has K16.
   auto mma_tiler = make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
+
+  // Check mma_tiler
+  print(mma_tiler);
+  print("-------------\n");
+  print(shape(mma_tiler));
+  print("-------------\n");
+  print(tile_shape(tiled_mma));
+  print("-------------\n");
 
   // In SM90,  the MMAs are CTA-local and perform thread-level partitioning.
   // In SM100, the MMAs are Cluster-local and perform CTA-level partitioning.
