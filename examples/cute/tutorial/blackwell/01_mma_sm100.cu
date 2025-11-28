@@ -432,7 +432,10 @@ void gemm_host_f16xf16_f32_f32_tnt(TypeA const* device_ptr_A, LayoutA layout_A,
   //    MMA instr is repeated in M/N mode and K mode of MMA tile, respectively.
   //  * Note that SMEM layouts are needed to determine SMEM allocation for kernel launch.
 
+  // -------
   // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned (MmaA, NumMma_M, NumMma_K)
+  // TiledMMA: (_128, _256, _16), A shape, MK: (_128, _16)
+  // Partition shape: (_128, _64) -> ((_128, _16), _1, _4), where _1, _4 for NumMma_M, NumMma_K
   auto mma_shape_A = partition_shape_A(tiled_mma, make_shape(size<0>(mma_tiler), size<2>(mma_tiler)));
   // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_K) to post-partitioned (MmaB, NumMma_N, NumMma_K)
   auto mma_shape_B = partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler)));
@@ -444,6 +447,9 @@ void gemm_host_f16xf16_f32_f32_tnt(TypeA const* device_ptr_A, LayoutA layout_A,
   // A and B tensors are swizzled in SMEM to improve MMA performance.
   //  * However, expressing swizzled layouts is very hard.
   //  * CuTe provides tile_to_mma_shape functions for SM100 to create swizzled layouts for post-partitioned Mma Shapes
+  //
+  // ----------
+  // k-major for both A and B, i.e. the reduction dimension.
   auto sA_layout = UMMA::tile_to_mma_shape(UMMA::Layout_K_SW128_Atom<TypeA>{}, mma_shape_A);
   auto sB_layout = UMMA::tile_to_mma_shape(UMMA::Layout_K_SW128_Atom<TypeB>{}, mma_shape_B);
 
@@ -458,6 +464,9 @@ void gemm_host_f16xf16_f32_f32_tnt(TypeA const* device_ptr_A, LayoutA layout_A,
   auto cluster_shape = make_shape(Int<1>{}, Int<1>{}, Int<1>{});
   Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape),
                                             make_tile(typename decltype(tiled_mma)::AtomThrID{}));
+
+  print("tiled_mma_AtomThrId:\t"); print(make_tile(typename decltype(tiled_mma)::AtomThrID{})); print("\n");
+  print("cluster_layout_vmnk:\t"); print(cluster_layout_vmnk); print("\n");
 
   ////////////////////////////////////////////////////////////
   //
