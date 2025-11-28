@@ -174,11 +174,17 @@ gemm_device(ATensor mA,                      // (Gemm_M, Gemm_K)
   Tensor gD = local_tile(mD, mma_tiler, mma_coord, Step<_1,_1, X>{});  // (MmaTile_M, MmaTile_N)
 
   if (thread0()) {
+    //
+    // mma tiler: (_128, _256, _16*4) -> (_128, _256, _64)
+    //
     print("mA:\t"); print(mA); print("\n");   // mA:   gmem_ptr[16b](GMEM_ADDR_A) o (512,256):(256,_1)
     print("mB:\t"); print(mB); print("\n");   // mB:   gmem_ptr[16b](GMEM_ADDR_B) o (1024,256):(256,_1)
     print("mC:\t"); print(mC); print("\n");   // mC:   gmem_ptr[32b](GMEM_ADDR_C) o (512,1024):(1024,_1)
     print("mD:\t"); print(mD); print("\n");   // mD:   gmem_ptr[32b](GMEM_ADDR_D) o (512,1024):(1024,_1)
 
+    // --------------
+    // since mma_coord is (block_m_idx, block_n_idx, _), i.e. k dimension are all selected,
+    // we now have the local_tile results (tiler_m, tiler_k, k) where tiler_k*k = GEMM_K
     print("gA:\t"); print(gA); print("\n");   // gA:   gmem_ptr[16b](GMEM_ADDR_A + offset_for_mma_tile) o (_128,_64,4):(256,_1,_64)
     print("gB:\t"); print(gB); print("\n");   // gB:   gmem_ptr[16b](GMEM_ADDR_B + offset_for_mma_tile) o (_256,_64,4):(_1,256,16384)
     print("gC:\t"); print(gC); print("\n");   // gC:   gmem_ptr[32b](GMEM_ADDR_C + offset_for_mma_tile) o (_128,_256):(256,_1)
@@ -192,6 +198,7 @@ gemm_device(ATensor mA,                      // (Gemm_M, Gemm_K)
   SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(shared_memory);
 
   // Represent the SMEM buffers for A and B
+  // Same as mma_tiler shape. ((_128,_16),_1,,_4)
   Tensor tCsA = shared_storage.tensor_sA();         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   Tensor tCsB = shared_storage.tensor_sB();         // (MmaB, NumMma_M, NumMma_K, Tiles_K)
 
@@ -209,6 +216,11 @@ gemm_device(ATensor mA,                      // (Gemm_M, Gemm_K)
   Tensor tCgD = cta_mma.partition_C(gD);         // (MmaC, NumMma_M, NumMma_N)
 
   if (thread0()) {
+    print("cta_mma_vmnk:\t"); print(mma_coord_vmnk); print("\n");  // mma_coord_vmnk:   
+    print("tiled_mma:\t"); print(tiled_mma); print("\n");          // tiled_mma:
+    print("cta_mma:\t"); print(cta_mma); print("\n");              // cta_mma:   
+    print("tCsA:\t"); print(tCsA); print("\n");                    // tCsA:   
+    print("tCsB:\t"); print(tCsB); print("\n");                    // tCsB:   
     print("tCgA:\t"); print(tCgA); print("\n");  // tCgA:   gmem_ptr[16b](GMEM_ADDR_A + offset_for_mma_tile + offset_for_mma) o ((_128,_16),_1,_4,4):((256,_1),_0,_16,_64)
     print("tCgB:\t"); print(tCgB); print("\n");  // tCgB:   gmem_ptr[16b](GMEM_ADDR_B + offset_for_mma_tile + offset_for_mma) o ((_256,_16),_1,_4,4):((_1,256),_0,4096,16384)
     print("tCgC:\t"); print(tCgC); print("\n");  // tCgC:   gmem_ptr[32b](GMEM_ADDR_C + offset_for_mma_tile + offset_for_mma) o ((_128,_256),_1,_1):((256,_1),_0,_0)
