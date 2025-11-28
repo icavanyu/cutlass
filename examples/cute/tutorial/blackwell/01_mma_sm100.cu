@@ -392,12 +392,18 @@ void gemm_host_f16xf16_f32_f32_tnt(TypeA const* device_ptr_A, LayoutA layout_A,
   auto mma_tiler = make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
 
   // Check mma_tiler
-  print(mma_tiler);
-  print("-------------\n");
+  print(mma_tiler);                              // 128,256,64
+  print("\n-------------\n");
   print(shape(mma_tiler));
-  print("-------------\n");
-  print(tile_shape(tiled_mma));
-  print("-------------\n");
+  print("\n-------------\n");
+  print(size<0>(mma_tiler));
+  print("\n-------------\n");
+  print(size<1>(mma_tiler));
+  print("\n-------------\n");
+  print(size<2>(mma_tiler));
+  print("\n-------------\n");
+  print(tile_shape(tiled_mma));                  // 128,256,16
+  print("\n-------------\n");
 
   // In SM90,  the MMAs are CTA-local and perform thread-level partitioning.
   // In SM100, the MMAs are Cluster-local and perform CTA-level partitioning.
