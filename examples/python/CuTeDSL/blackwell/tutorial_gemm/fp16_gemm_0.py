@@ -136,25 +136,37 @@ def kernel(
     # Partition tensors for MMA and make fragments
     # (bM, bK, RestK)
     gA = cute.local_tile(mA_mkl, mma_tiler_mnk, mma_coord_mnk, proj=(1, None, 1))
+    print(f"gA            = {cute.pretty_str(gA)}")
     # (bN, bK, RestK)
     gB = cute.local_tile(mB_nkl, mma_tiler_mnk, mma_coord_mnk, proj=(None, 1, 1))
+    print(f"gB            = {cute.pretty_str(gB)}")
     # (bM, bN)
     gC = cute.local_tile(mC_mnl, mma_tiler_mnk, mma_coord_mnk, proj=(1, 1, None))
+    print(f"gC            = {cute.pretty_str(gC)}")
+
     thr_mma = tiled_mma.get_slice(0)
+    print(f"thr_mma = {cute.pretty_str(thr_mma)}")
     # (MMA, MMA_M, MMA_K)
     tCgA = thr_mma.partition_A(gA)
+    print(f"tCgA = {cute.pretty_str(tCgA)}")
     # (MMA, MMA_N, MMA_K)
     tCgB = thr_mma.partition_B(gB)
+    print(f"tCgB = {cute.pretty_str(tCgB)}")
     # (MMA, MMA_M, MMA_N)
     tCgC = thr_mma.partition_C(gC)
+    print(f"tCgC = {cute.pretty_str(tCgC)}")
     # (MMA, MMA_M, MMA_K)
     tCrA = tiled_mma.make_fragment_A(sA)
+    print(f"tCrA = {cute.pretty_str(tCrA)}")
     # (MMA, MMA_N, MMA_K)
     tCrB = tiled_mma.make_fragment_B(sB)
+    print(f"tCrB = {cute.pretty_str(tCrB)}")
     # (MMA, MMA_M, MMA_N)
     acc_shape = tiled_mma.partition_shape_C(mma_tiler_mnk[:2])
+    print(f"acc_shape = {cute.pretty_str(acc_shape)}")
     # (MMA, MMA_M, MMA_N)
     tCtAcc = tiled_mma.make_fragment_C(acc_shape)
+    print(f"tCtAcc = {cute.pretty_str(tCtAcc)}")
     # Partition tensors for TMA; This requires the tensors partitioned for MMA
     tAsA, tAgA = cute.nvgpu.cpasync.tma_partition(
         tma_atom_a,
@@ -170,6 +182,10 @@ def kernel(
         cute.group_modes(sB, 0, 3),
         cute.group_modes(tCgB, 0, 3),
     )
+    print(f"tAsA = {cute.pretty_str(tAsA)}")
+    print(f"tAgA = {cute.pretty_str(tAgA)}")
+    print(f"tBsB = {cute.pretty_str(tBsB)}")
+    print(f"tBgB = {cute.pretty_str(tBgB)}")
 
     # CTA-wide sync before retrieving the pointer to the start of the allocated TMEM
     # Only warp 0 does the allocation so we need to sync before retrieving the TMEM start address
@@ -183,10 +199,13 @@ def kernel(
     epi_tiler = (
         (cute.size(tCtAcc, mode=[0, 0]), cute.size(tCtAcc, mode=[0, 1]) // subtile_cnt),
     )
+    print(f"epi_tiler = {cute.pretty_str(epi_tiler)}")
     # (EpiTile, NumTiles)
     tCtAcc_epi = cute.zipped_divide(tCtAcc, epi_tiler)
+    print(f"tCtAcc_epi = {cute.pretty_str(tCtAcc_epi)}")
     # (EpiTile, NumTiles)
     gC_epi = cute.zipped_divide(tCgC, epi_tiler)
+    print(f"gC_epi = {cute.pretty_str(gC_epi)}")
 
     # Every thread loads 32x128 bits
     tmem_atom = cute.make_copy_atom(
@@ -195,6 +214,9 @@ def kernel(
     )
     tmem_tiled_copy = tcgen05.make_tmem_copy(tmem_atom, tCtAcc_epi[None, 0])
     tmem_thr_copy = tmem_tiled_copy.get_slice(tidx)
+    print(f"tmem_atom = {cute.pretty_str(tmem_atom)}")
+    print(f"tmem_tiled_copy = {cute.pretty_str(tmem_tiled_copy)}")
+    print(f"tmem_thr_copy = {cute.pretty_str(tmem_thr_copy)}")
 
     # (TmemCpy,NumTmemCpy,NumTiles)
     tDtC = tmem_thr_copy.partition_S(tCtAcc_epi)
@@ -206,10 +228,16 @@ def kernel(
     # (TmemCpy,NumTmemCpy)
     tCrC = cute.make_rmem_tensor(tDgC[None, None, 0].shape, io_dtype)
 
+    print(f"tDtC = {cute.pretty_str(tDtC)}")
+    print(f"tDgC = {cute.pretty_str(tDgC)}")
+    print(f"tCrAcc = {cute.pretty_str(tCrAcc)}")
+    print(f"tCrC = {cute.pretty_str(tCrC)}")
+
     #
     # 2. Main loop
     #
     num_k_tiles = cute.size(gA, mode=[2])
+    print(f"num_k_tiles = {cute.pretty_str(num_k_tiles)}")
     if warp_idx == 0:
         # Wait for a empty accumulator buffer
         acc_empty = acc_producer.acquire_and_advance()
@@ -222,6 +250,7 @@ def kernel(
                 tAsA[(None, ab_empty.index)],
                 tma_bar_ptr=ab_empty.barrier,
             )
+            print(f"tAgA[] = {cute.pretty_str(tAgA[(None, ab_empty.count)])}")
             cute.copy(
                 tma_atom_b,
                 tBgB[(None, ab_empty.count)],
@@ -324,17 +353,32 @@ def host_function(
     )
 
     # Pretty prints kernel attributes useful for debugging
-    # print(f"a            = {cute.pretty_str(a)}")
-    # print(f"b            = {cute.pretty_str(b)}")
-    # print(f"c            = {cute.pretty_str(c)}")
-    # print(f"tiled_mma    = {cute.pretty_str(tiled_mma)}")
-    # print(f"a_tma_atom   = {cute.pretty_str(a_tma_atom)}")
-    # print(f"b_tma_atom   = {cute.pretty_str(b_tma_atom)}")
-    # print(f"a_tma_tensor = {cute.pretty_str(a_tma_tensor)}")
-    # print(f"b_tma_tensor = {cute.pretty_str(b_tma_tensor)}")
+    print(f"a            = {cute.pretty_str(a)}")
+    print(f"b            = {cute.pretty_str(b)}")
+    print(f"c            = {cute.pretty_str(c)}")
+    print(f"op           = {cute.pretty_str(op)}")
+    print(f"tiled_mma    = {cute.pretty_str(tiled_mma)}")
+    print(f"mma_tiler    = {cute.pretty_str(mma_tiler_mnk)}")
+    print(f"a_smem_layout= {cute.pretty_str(a_smem_layout)}")
+    print(f"b_smem_layout= {cute.pretty_str(b_smem_layout)}")
+    print(f"a_smem_layout_one_stage= {cute.pretty_str(a_smem_layout_one_stage)}")
+    print(f"b_smem_layout_one_stage= {cute.pretty_str(b_smem_layout_one_stage)}")
+    print(f"a_tma_atom   = {cute.pretty_str(a_tma_atom)}")
+    print(f"b_tma_atom   = {cute.pretty_str(b_tma_atom)}")
+    print(f"a_tma_tensor = {cute.pretty_str(a_tma_tensor)}")
+    print(f"b_tma_tensor = {cute.pretty_str(b_tma_tensor)}")
 
     # Launch the kernel
     grid_shape = cute.ceil_div((*c.layout.shape, 1), mma_tiler_mnk[:2])
+    print(f"c.layout     = {cute.pretty_str(c.layout)}")
+    print(f"c.layout.shape = {cute.pretty_str(c.layout.shape)}")
+    print(f"grid_shape = {cute.pretty_str(grid_shape)}")
+
+    print(f"a_smem_layout.outer = {cute.pretty_str(a_smem_layout.outer)}")
+    print(f"a_smem_layout.inner = {cute.pretty_str(a_smem_layout.inner)}")
+    print(f"b_smem_layout.outer = {cute.pretty_str(b_smem_layout.outer)}")
+    print(f"b_smem_layout.inner = {cute.pretty_str(b_smem_layout.inner)}")
+
     kernel(
         tiled_mma,
         a_tma_atom,
