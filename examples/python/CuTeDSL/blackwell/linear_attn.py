@@ -60,6 +60,7 @@ import argparse
 import math
 import os
 import sys
+import time
 from typing import Type, Tuple, List
 
 import torch
@@ -117,9 +118,9 @@ class LinearAttentionChunkwise:
         self.threads_per_warp = 32
         
         # MMA tile shapes
-        self.qk_mma_tiler = (128, 128, 32)  # (M, N, K)
-        self.kv_mma_tiler = (128, 128, 32)  # (M, N, K)
-        self.pv_mma_tiler = (128, 128, 32)  # (M, N, K)
+        self.qk_mma_tiler = (64, 64, 32)  # (M, N, K)
+        self.kv_mma_tiler = (64, 64, 32)  # (M, N, K)
+        self.pv_mma_tiler = (64, 64, 32)  # (M, N, K)
         self.cta_tiler = self.qk_mma_tiler  # For simplicity, use same tiler
         
         # one-cta cluster shape
@@ -180,14 +181,14 @@ class LinearAttentionChunkwise:
         chunk_size: int,
         ) -> cute.Shape:
         """Compute tile scheduler parameters based on the chunk size and MMA tiler."""
-        return cute.Shape((
+        return (
             # S / CHUNK
             cute.ceil_div(o_shape[0], chunk_size),
             # H
             cute.size(o_shape[2][0]),
             # D
             cute.size(o_shape[2][1]),
-        ))
+        )
         
     
     @cute.jit
@@ -296,7 +297,7 @@ class LinearAttentionChunkwise:
             p_major_mode,
             self.v_major_mode,
             self.pv_acc_dtype,
-            cta_group,
+            self.cta_group,
             self.pv_mma_tiler[:2],
             tcgen05.OperandSource.TMEM,
         )
@@ -344,7 +345,7 @@ class LinearAttentionChunkwise:
         tma_store_op = cute.nvgpu.cpasync.CopyBulkTensorTileS2GOp()
 
         # TMA load for Q
-        q_smem_layout = cute.select_layout_stage(q_smem_layout_staged, mode=[0,1,2])
+        q_smem_layout = cute.select(q_smem_layout_staged, mode=[0,1,2])
         tma_atom_q, tma_tensor_q = cute.nvgpu.make_tiled_tma_atom_A(
             tma_load_op,
             q,
@@ -413,6 +414,10 @@ class LinearAttentionChunkwise:
                 cute.struct.MemRange[self.k_dtype, cute.cosize(k_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
+            sV: cute.struct.Align[
+                cute.struct.MemRange[self.v_dtype, cute.cosize(v_smem_layout_staged)],
+                self.buffer_align_bytes,
+            ]
 
         self.shared_storage = SharedStorage        
 
@@ -438,6 +443,7 @@ class LinearAttentionChunkwise:
             k_smem_layout_staged,
             v_smem_layout_staged,
             o_smem_layout_staged,
+            p_tmem_layout_staged,
             self.chunk_size,
         ).launch(
             grid=self.grid,
@@ -466,6 +472,7 @@ class LinearAttentionChunkwise:
         k_smem_layout_staged: cute.ComposedLayout,
         v_smem_layout_staged: cute.ComposedLayout,
         o_smem_layout_staged: cute.ComposedLayout,
+        p_tmem_layout_staged: cute.ComposedLayout,
         chunk_size: int,
     ):
         """Kernel for linear attention.
@@ -600,24 +607,23 @@ class LinearAttentionChunkwise:
 
         tP = cute.make_tensor(tStS.iterator, p_tmem_layout_staged.outer)
 
-        tOrP = pv_thr_mma.make_fragment_A(tP)[None, None, None, 0]
-        tOrP0 = cute.make_tensor(
-            tOrP.iterator
-            + self.qk_acc_dtype.width // self.q_dtype.width * self.tmem_p0_offset,
-            tOrP.layout,
-        )
-        tOrP1 = cute.make_tensor(
-            tOrP.iterator
-            + self.qk_acc_dtype.width // self.q_dtype.width * self.tmem_p1_offset,
-            tOrP.layout,
-        )
-        self.cta_sync_barrier.arrive_and_wait()
+        # tOrP = pv_thr_mma.make_fragment_A(tP)[None, None, None, 0]
+        # tOrP0 = cute.make_tensor(
+        #    tOrP.iterator
+        #    + self.qk_acc_dtype.width // self.q_dtype.width * self.tmem_p0_offset,
+        #    tOrP.layout,
+        # )
+        # tOrP1 = cute.make_tensor(
+        #     tOrP.iterator
+        #     + self.qk_acc_dtype.width // self.q_dtype.width * self.tmem_p1_offset,
+        #     tOrP.layout,
+        # )
+        # self.cta_sync_barrier.arrive_and_wait()
 
         # ///////////////////////////////////////////////////////////////////////////////
         # LOAD WARP
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.load_warp_id:
-            cute.arch.warpgroup_reg_dealloc(32)
             
             # Load warp handles data loading for the entire chunk
             # Uses async copy or TMA to bring Q, K, V from global to shared memory
@@ -637,8 +643,7 @@ class LinearAttentionChunkwise:
         # ///////////////////////////////////////////////////////////////////////////////
         # COMPUTE WARPS
         # ///////////////////////////////////////////////////////////////////////////////
-        if warp_idx in self.compute_warp_ids:
-            cute.arch.warpgroup_reg_alloc(192)
+        if warp_idx == self.mma_warp_id:
             
             # Compute warp group processes chunkwise linear attention
             # Each warp computes a portion of the sequence in chunks
@@ -683,8 +688,7 @@ class LinearAttentionChunkwise:
         # ///////////////////////////////////////////////////////////////////////////////
         # CORRECTION WARPS
         # ///////////////////////////////////////////////////////////////////////////////
-        if warp_idx in self.correction_warp_ids:
-            cute.arch.warpgroup_reg_alloc(96)
+        if warp_idx in self.decay_warp_ids:
             
             # Correction warps perform numerical stability fixes and refinements
             # 
@@ -702,7 +706,7 @@ class LinearAttentionChunkwise:
         # EMPTY WARP - Synchronization
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.empty_warp_id:
-            cute.arch.warpgroup_reg_dealloc(32)
+            pass    
         
         return
 
@@ -720,9 +724,9 @@ def main():
         description="Chunkwise Linear Attention with Headwise Decay"
     )
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
-    parser.add_argument("--seq_len", type=int, default=256, help="Sequence length")
-    parser.add_argument("--num_heads", type=int, default=8, help="Number of heads")
-    parser.add_argument("--head_dim", type=int, default=64, help="Head dimension")
+    parser.add_argument("--seq_len", type=int, default=4096, help="Sequence length")
+    parser.add_argument("--num_heads", type=int, default=64, help="Number of heads")
+    parser.add_argument("--head_dim", type=int, default=128, help="Head dimension")
     parser.add_argument("--chunk_size", type=int, default=64, help="Chunk size")
     parser.add_argument("--decay", type=float, default=0.95, help="Decay factor")
     parser.add_argument(
@@ -762,9 +766,9 @@ def main():
     B, S, H, D = args.batch_size, args.seq_len, args.num_heads, args.head_dim
     
     # Input tensors in format [B, S, H, D]
-    Q = torch.randn(B, S, H, D, device="cuda", dtype=args.io_dtype)
-    K = torch.randn(B, S, H, D, device="cuda", dtype=args.io_dtype)
-    V = torch.randn(B, S, H, D, device="cuda", dtype=args.io_dtype)
+    Q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    K = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    V = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
     
     # Per-head decay coefficients [H]
     decay = torch.full((H,), args.decay, device="cuda", dtype=torch.float32)
@@ -784,13 +788,27 @@ def main():
         kv_acc_dtype=args.acc_dtype,
         io_dtype=args.io_dtype,
     )
-    
+
     # Get default stream
-    stream = cutlass.cuda.default_stream()
-    
+    stream = cutlass_torch.default_stream()
+
+    start_time = time.time()
+    compiled = cute.compile(
+        attn_kernel,
+        q_cute.iterator,
+        k_cute.iterator,
+        v_cute.iterator,
+        o_cute.iterator,
+        decay_cute.iterator,
+        (Int32(B), Int32(S), Int32(H), Int32(D)),
+        stream,
+    )
+    compilation_time = time.time() - start_time
+    print(f"Compilation time: {compilation_time:.4f} seconds")
+
     # Warmup
     for _ in range(args.warmup_iterations):
-        attn_kernel(
+        compiled(
             q_cute.iterator,
             k_cute.iterator,
             v_cute.iterator,
@@ -802,11 +820,10 @@ def main():
     
     # Benchmark
     torch.cuda.synchronize()
-    import time
     start = time.perf_counter()
     
     for _ in range(args.iterations):
-        attn_kernel(
+        compiled(
             q_cute.iterator,
             k_cute.iterator,
             v_cute.iterator,
