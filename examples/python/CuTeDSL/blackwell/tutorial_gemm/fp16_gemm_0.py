@@ -95,6 +95,10 @@ def kernel(
         byte_alignment=128,
         swizzle=b_smem_layout.inner,
     )
+    # a_smem_layout.outer = ((128,16),1,4,4):((64,1),0,16,8192)
+    # a_smem_layout.inner = S<3,4,3>
+    # b_smem_layout.outer = ((256,16),1,4,4):((64,1),0,16,16384)
+    # b_smem_layout.inner = S<3,4,3>
 
     # Allocate all TMEM columns
     tmem_alloc_barrier = pipeline.NamedBarrier(
@@ -142,10 +146,26 @@ def kernel(
     print(f"gB            = {cute.pretty_str(gB)}")
     # (bM, bN)
     gC = cute.local_tile(mC_mnl, mma_tiler_mnk, mma_coord_mnk, proj=(1, 1, None))
-    print(f"gC            = {cute.pretty_str(gC)}")
 
     thr_mma = tiled_mma.get_slice(0)
-    print(f"thr_mma = {cute.pretty_str(thr_mma)}")
+    print(f"gA = {cute.pretty_str(gA)}")
+    print(f"gB = {cute.pretty_str(gB)}")
+    print(f"gC = {cute.pretty_str(gC)}")
+
+    # gA            = tensor<(0,?{div=128}) o (128,64,?):(1@1,1@0,64@0)>
+    # num_k_blocks  = 8192 / 64
+    # gB            = tensor<(0,?{div=256}) o (256,64,?):(1@1,1@0,64@0)>
+    # gC            = tensor<ptr<f16, gmem, align<32>> o (128,256):(?{i64 div=8192},1)>
+    # thr_mma = Tiled MMA
+    #   Thr Layout VMNK: (1,1,1,1):(0,0,0,0)
+    #   Permutation MNK: (_,_,_)
+    # MMA Atom
+    #   ThrID:           1:0
+    #   Shape MNK:       (128,256,16)
+    #   TV Layout A:     (1,(128,16)):(128,(1,128))
+    #   TV Layout B:     (1,(256,16)):(256,(1,256))
+    #   TV Layout C:     (1,(128,256)):(128,(1,128))
+
     # (MMA, MMA_M, MMA_K)
     tCgA = thr_mma.partition_A(gA)
     print(f"tCgA = {cute.pretty_str(tCgA)}")
@@ -154,13 +174,29 @@ def kernel(
     print(f"tCgB = {cute.pretty_str(tCgB)}")
     # (MMA, MMA_M, MMA_N)
     tCgC = thr_mma.partition_C(gC)
+
+    print(f"thr_mma = {cute.pretty_str(thr_mma)}")
+    print(f"tCgA = {cute.pretty_str(tCgA)}")
+    print(f"tCgB = {cute.pretty_str(tCgB)}")
     print(f"tCgC = {cute.pretty_str(tCgC)}")
+
+    # tCgA = tensor<(0,?{div=128}) o ((128,16),1,4,?):((1@1,1@0),0,16@0,64@0)>
+    # NOTE: k=8192, grid 切分是按照 M,N， 因此 k 需要遍历 8192 / (64*stages?)
+    # tCgB = tensor<(0,?{div=256}) o ((256,16),1,4,?):((1@1,1@0),0,16@0,64@0)>
+    # tCgC = tensor<ptr<f16, gmem, align<32>> o ((128,256),1,1):((?{i64 div=8192},1),0,0)>
+
     # (MMA, MMA_M, MMA_K)
     tCrA = tiled_mma.make_fragment_A(sA)
     print(f"tCrA = {cute.pretty_str(tCrA)}")
     # (MMA, MMA_N, MMA_K)
     tCrB = tiled_mma.make_fragment_B(sB)
+    print(f"tCrA = {cute.pretty_str(tCrA)}")
     print(f"tCrB = {cute.pretty_str(tCrB)}")
+    # NOTE: 4 for 4*16, another 4 for stages
+    # tCrA = tensor<Value(%836 = "cute.get_iter"(%835) : (!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, "(1,1,4,4):(0,0,2,1024)">) -> !cute_nvgpu.smem_desc) o (1,1,4,4):(0,0,2,1024)>
+    # tCrB = tensor<Value(%844 = "cute.get_iter"(%843) : (!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, "(1,1,4,4):(0,0,2,2048)">) -> !cute_nvgpu.smem_desc) o (1,1,4,4):(0,0,2,2048)>
+
+
     # (MMA, MMA_M, MMA_N)
     acc_shape = tiled_mma.partition_shape_C(mma_tiler_mnk[:2])
     print(f"acc_shape = {cute.pretty_str(acc_shape)}")
@@ -168,6 +204,7 @@ def kernel(
     tCtAcc = tiled_mma.make_fragment_C(acc_shape)
     print(f"tCtAcc = {cute.pretty_str(tCtAcc)}")
     # Partition tensors for TMA; This requires the tensors partitioned for MMA
+    # Tiles the GMEM and SMEM tensors for the provided TMA Copy Atom.
     tAsA, tAgA = cute.nvgpu.cpasync.tma_partition(
         tma_atom_a,
         0,
@@ -186,6 +223,13 @@ def kernel(
     print(f"tAgA = {cute.pretty_str(tAgA)}")
     print(f"tBsB = {cute.pretty_str(tBsB)}")
     print(f"tBgB = {cute.pretty_str(tBgB)}")
+
+    # acc_shape = ((128,256),1,1)
+    # tCtAcc = tensor<ptr<f32, tmem, align<1>> o ((128,256),1,1):((65536,1),0,0)>
+    # tAsA = tensor<ptr<f16, smem, align<128>, S<3,4,3>> o ((8192,1),4):((1,0),8192)>
+    # tAgA = tensor<(0,?{div=128}) o (((64,128),1),?):(((1@0,1@1),0),64@0)>
+    # tBsB = tensor<ptr<f16, smem, align<128>, S<3,4,3>> o ((16384,1),4):((1,0),16384)>
+    # tBgB = tensor<(0,?{div=256}) o (((64,256),1),?):(((1@0,1@1),0),64@0)>
 
     # CTA-wide sync before retrieving the pointer to the start of the allocated TMEM
     # Only warp 0 does the allocation so we need to sync before retrieving the TMEM start address
@@ -212,6 +256,7 @@ def kernel(
         tcgen05.Ld32x32bOp(tcgen05.Repetition.x64),
         cutlass.Float32,
     )
+    # 
     tmem_tiled_copy = tcgen05.make_tmem_copy(tmem_atom, tCtAcc_epi[None, 0])
     tmem_thr_copy = tmem_tiled_copy.get_slice(tidx)
     print(f"tmem_atom = {cute.pretty_str(tmem_atom)}")
@@ -228,10 +273,35 @@ def kernel(
     # (TmemCpy,NumTmemCpy)
     tCrC = cute.make_rmem_tensor(tDgC[None, None, 0].shape, io_dtype)
 
-    print(f"tDtC = {cute.pretty_str(tDtC)}")
-    print(f"tDgC = {cute.pretty_str(tDgC)}")
-    print(f"tCrAcc = {cute.pretty_str(tCrAcc)}")
-    print(f"tCrC = {cute.pretty_str(tCrC)}")
+    # epi_tiler = ((128,64))
+    # tCtAcc_epi = tensor<ptr<f32, tmem, align<16>> o (((128,64)),((1,4),1,1)):(((65536,1)),((0,64),0,0))>
+    # gC_epi = tensor<ptr<f16, gmem, align<32>> o (((128,64)),((1,4),1,1)):(((?{i64 div=8192},1)),((0,64),0,0))>
+    # tmem_atom = Copy Atom
+    #   ThrID:         32:1
+    #   TV Layout Src: (32,2048):(0,1)
+    #   TV Layout Dst: (32,64):(64,1)
+    #   Value type:    f32
+    # tmem_tiled_copy = Tiled Copy
+    #   Tiler MN:        ((256,32):(32,1))
+    #   TV Layout tiled: ((32,4),(64,32)):((0,1),(4,256))
+    # Copy Atom
+    #   ThrID:           32:1
+    #   TV Layout Src:   (32,2048):(0,1)
+    #   TV Layout Dst:   (32,64):(64,1)
+    #   Value type:      f32
+    # tmem_thr_copy = Tiled Copy
+    #   Tiler MN:        ((256,32):(32,1))
+    #   TV Layout tiled: ((32,4),(64,32)):((0,1),(4,256))
+    # Copy Atom
+    #   ThrID:           32:1
+    #   TV Layout Src:   (32,2048):(0,1)
+    #   TV Layout Dst:   (32,64):(64,1)
+    #   Value type:      f32
+    # tDtC = tensor<ptr<f32, tmem, align<16>> o (((64,32),1),1,((1,4),1,1)):(((1,65536),0),0,((0,64),0,0))>
+    # tDgC = tensor<ptr<f16, gmem, align<32>> o ((64,1),1,((1,4),1,1)):((1,0),0,((0,64),0,0))>
+    # epitile is (128,64), 128 threads, every threads write out 64 items to rmem.
+    # tCrAcc = tensor<ptr<f32, rmem, align<32>> o ((64,1),1):((1,0),0)>
+    # tCrC = tensor<ptr<f16, rmem, align<32>> o ((64,1),1):((1,0),0)>
 
     #
     # 2. Main loop
@@ -335,6 +405,11 @@ def host_function(
     a_smem_layout_one_stage = cute.select(a_smem_layout, mode=[0, 1, 2])
     b_smem_layout_one_stage = cute.select(b_smem_layout, mode=[0, 1, 2])
 
+    # a_smem_layout= S<3,4,3> o 0 o ((128,16),1,4,4):((64,1),0,16,8192)
+    # b_smem_layout= S<3,4,3> o 0 o ((256,16),1,4,4):((64,1),0,16,16384)
+    # a_smem_layout_one_stage= S<3,4,3> o 0 o ((128,16),1,4):((64,1),0,16)
+    # b_smem_layout_one_stage= S<3,4,3> o 0 o ((256,16),1,4):((64,1),0,16)
+
     # Construct TMA load atoms
     op = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE)
     a_tma_atom, a_tma_tensor = cute.nvgpu.make_tiled_tma_atom_A(
@@ -351,6 +426,41 @@ def host_function(
         mma_tiler_mnk,
         tiled_mma,
     )
+    # MMA Atom
+    #   ThrID:           1:0
+    #   Shape MNK:       (128,256,16)
+    #   TV Layout A:     (1,(128,16)):(128,(1,128))
+    #   TV Layout B:     (1,(256,16)):(256,(1,256))
+    #   TV Layout C:     (1,(128,256)):(128,(1,128))
+    # a_tma_atom   = Copy Atom
+    #   ThrID:         1:0
+    #   TV Layout Src: (1,8192):(0,1)
+    #   TV Layout Dst: (1,8192):(0,1)
+    #   Value type:    f16
+    # b_tma_atom   = Copy Atom
+    #   ThrID:         1:0
+    #   TV Layout Src: (1,16384):(0,1)
+    #   TV Layout Dst: (1,16384):(0,1)
+    #   Value type:    f16
+    #
+    # a_tma_tensor = tensor<(0,0) o (?,?{div=8192}):(1@1,1@0)>
+    # b_tma_tensor = tensor<(0,0) o (?,?{div=8192}):(1@1,1@0)>
+    # b_tma 16384 = 256*64
+    # a_tma 8192  = 128*64
+    #
+
+# ===================================================================
+# Running Blackwell fp16 GEMM example 0 with:
+#   mnk:       [8192, 8192, 8192]
+#   tolerance: 0.1
+# ===================================================================
+# 
+# a            = tensor<ptr<f16, gmem, align<32>> o (?,?{div=8192}):(?{i64 div=8192},1)>
+# b            = tensor<ptr<f16, gmem, align<32>> o (?,?{div=8192}):(?{i64 div=8192},1)>
+# c            = tensor<ptr<f16, gmem, align<32>> o (?,?{div=8192}):(?{i64 div=8192},1)>
+# tiled_mma    = Tiled MMA
+#   Thr Layout VMNK: (1,1,1,1):(0,0,0,0)
+#   Permutation MNK: (_,_,_)
 
     # Pretty prints kernel attributes useful for debugging
     print(f"a            = {cute.pretty_str(a)}")
@@ -368,6 +478,7 @@ def host_function(
     print(f"a_tma_tensor = {cute.pretty_str(a_tma_tensor)}")
     print(f"b_tma_tensor = {cute.pretty_str(b_tma_tensor)}")
 
+    # mma_tiler    = (128,256,64)
     # Launch the kernel
     grid_shape = cute.ceil_div((*c.layout.shape, 1), mma_tiler_mnk[:2])
     print(f"c.layout     = {cute.pretty_str(c.layout)}")
