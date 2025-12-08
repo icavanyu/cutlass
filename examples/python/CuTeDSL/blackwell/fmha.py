@@ -796,6 +796,25 @@ class BlackwellFusedMultiHeadAttentionForward:
             tOrP.layout,
         )
         self.cta_sync_barrier.arrive_and_wait()
+
+        print(f"sQ: {cute.pretty_str(sQ)}")
+        print(f"sK: {cute.pretty_str(sK)}")
+        print(f"sV: {cute.pretty_str(sV)}")
+        print(f"sO: {cute.pretty_str(sO)}")
+        print(f"qk_thr_mma: {cute.pretty_str(qk_thr_mma)}")
+        print(f"pv_thr_mma: {cute.pretty_str(pv_thr_mma)}")
+        print(f"tSrQ: {cute.pretty_str(tSrQ)}")
+        print(f"tSrK: {cute.pretty_str(tSrK)}")
+        print(f"tStS: {cute.pretty_str(tStS)}")
+        print(f"tOtO: {cute.pretty_str(tOtO)}")
+        print(f"qk_acc_shape: {cute.pretty_str(qk_acc_shape)}")
+        print(f"pv_acc_shape: {cute.pretty_str(pv_acc_shape)}")
+        print(f"tStS0: {tStS0}")
+        print(f"tStS1: {tStS1}")
+        print(f"tOtO0: {tOtO0}")
+        print(f"tOtO1: {tOtO1}")
+        print(f"tP: {cute.pretty_str(tP)}")
+
         # ///////////////////////////////////////////////////////////////////////////////
         #  EMPTY
         # ///////////////////////////////////////////////////////////////////////////////

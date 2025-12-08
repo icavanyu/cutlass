@@ -118,9 +118,16 @@ class LinearAttentionChunkwise:
         self.threads_per_warp = 32
         
         # MMA tile shapes
-        self.qk_mma_tiler = (64, 64, 32)  # (M, N, K)
-        self.kv_mma_tiler = (64, 64, 32)  # (M, N, K)
-        self.pv_mma_tiler = (64, 64, 32)  # (M, N, K)
+        # C: 64, choose chunk size as 64 for enough spaces to do double buffering
+        # Q: (64, 128)
+        # K: (64, 128)
+        # V: (64, 128)
+        # (C, C, D)
+        self.qk_mma_tiler = (64, 64, 128)  # (M, N, K)
+        # (C, D, C)
+        self.pv_mma_tiler = (64, 128, 64)  # (M, N, K)
+        # (D, D, C)
+        self.kv_mma_tiler = (128, 128, 64)  # (M, N, K)
         self.cta_tiler = self.qk_mma_tiler  # For simplicity, use same tiler
         
         # one-cta cluster shape
@@ -156,8 +163,10 @@ class LinearAttentionChunkwise:
 
         self.buffer_align_bytes = 1024
 
-        # store p = qk^t for this chunk
+        # Store p = qk^t for this chunk
         self.tmem_p_offset = 0
+        # Store kv = k^T*v
+        self.tmem_kv_offset = 0
 
         # Store states for this CTA (w/ head_idx, batch_idx Fixed)
 
@@ -167,8 +176,8 @@ class LinearAttentionChunkwise:
     def _setup_attributes(self):
         """Set up configurations and parameters for the linear attention kernel."""
         self.q_stage = 2
-        self.k_stage = 3
-        self.v_stage = 3
+        self.k_stage = 2
+        self.v_stage = 2
         self.o_stage = 2
         self.epi_stage = 2
         self.acc_stage = 1
@@ -611,7 +620,7 @@ class LinearAttentionChunkwise:
         kv_thr_mma = kv_tiled_mma.get_slice(0)
         tSrQ = qk_thr_mma.make_fragment_A(sQ)
         tSrK = qk_thr_mma.make_fragment_A(sK)
-        tSrV = qk_thr_mma.make_fragment_A(sV)
+        tSrV = pv_thr_mma.make_fragment_B(sV)
 
         qk_acc_shape = qk_thr_mma.partition_shape_C(
             (self.qk_mma_tiler[0], self.qk_mma_tiler[1])
@@ -641,7 +650,7 @@ class LinearAttentionChunkwise:
         tOtO1 = cute.make_tensor(tOtO.iterator + self.tmem_o1_offset, tOtO.layout)       
 
         tP = cute.make_tensor(tStS.iterator, p_tmem_layout_staged.outer)
-        tPfragA = pv_thr_mma.make_fragment_A(tP)
+        # tPfragA = pv_thr_mma.make_fragment_A(tP)
 
         print(f"sQ: {cute.pretty_str(sQ)}")
         print(f"sK: {cute.pretty_str(sK)}")
@@ -662,7 +671,7 @@ class LinearAttentionChunkwise:
         print(f"tOtO0: {tOtO0}")
         print(f"tOtO1: {tOtO1}")
         print(f"tP: {cute.pretty_str(tP)}")
-        print(f"tPfragA: {cute.pretty_str(tPfragA)}")
+        # print(f"tPfragA: {cute.pretty_str(tPfragA)}")
         
         # tOrP = pv_thr_mma.make_fragment_A(tP)[None, None, None, 0]
         # tOrP0 = cute.make_tensor(
@@ -681,6 +690,7 @@ class LinearAttentionChunkwise:
         # LOAD WARP
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.load_warp_id:
+            cute.arch.warpgroup_reg_dealloc(self.num_regs_other)
             
             # Load warp handles data loading for the entire chunk
             # Uses async copy or TMA to bring Q, K, V from global to shared memory
