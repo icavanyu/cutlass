@@ -390,6 +390,41 @@ class LinearAttentionChunkwise:
         self.tma_copy_q_bytes = q_copy_size
         self.tma_copy_kv_bytes = k_copy_size        
 
+        print(f"q_layout: {cute.pretty_str(q_layout)}")
+        print(f"q: {cute.pretty_str(q)}")
+        print(f"k_layout: {cute.pretty_str(k_layout)}")
+        print(f"k: {cute.pretty_str(k)}")
+        print(f"v_layout: {cute.pretty_str(v_layout)}")
+        print(f"v: {cute.pretty_str(v)}")
+        print(f"o_layout: {cute.pretty_str(o_layout)}")
+        print(f"o: {cute.pretty_str(o)}")
+        print(f"qk_tiled_mma: {cute.pretty_str(qk_tiled_mma)}")
+        print(f"kv_tiled_mma: {cute.pretty_str(kv_tiled_mma)}")
+        print(f"pv_tiled_mma: {cute.pretty_str(pv_tiled_mma)}")
+        print(f"cluster_layout_vmnk: {cute.pretty_str(self.cluster_layout_vmnk)}")
+        print(f"epi_tile: {cute.pretty_str(self.epi_tile)}")
+        print(f"q_smem_layout: {cute.pretty_str(q_smem_layout)}")
+        print(f"k_smem_layout: {cute.pretty_str(k_smem_layout)}")
+        print(f"v_smem_layout: {cute.pretty_str(v_smem_layout)}")
+        print(f"o_smem_layout: {cute.pretty_str(o_smem_layout)}")
+        print(f"q_smem_layout_staged: {cute.pretty_str(q_smem_layout_staged)}")
+        print(f"k_smem_layout_staged: {cute.pretty_str(k_smem_layout_staged)}")
+        print(f"v_smem_layout_staged: {cute.pretty_str(v_smem_layout_staged)}")
+        print(f"o_smem_layout_staged: {cute.pretty_str(o_smem_layout_staged)}")
+        print(f"p_tmem_layout_staged: {cute.pretty_str(p_tmem_layout_staged)}")
+        print(f"tma_atom_q: {cute.pretty_str(tma_atom_q)}")
+        print(f"tma_atom_k: {cute.pretty_str(tma_atom_k)}")
+        print(f"tma_atom_v: {cute.pretty_str(tma_atom_v)}")
+        print(f"tma_atom_o: {cute.pretty_str(tma_atom_o)}")
+        print(f"tma_tensor_q: {cute.pretty_str(tma_tensor_q)}")
+        print(f"tma_tensor_k: {cute.pretty_str(tma_tensor_k)}")
+        print(f"tma_tensor_v: {cute.pretty_str(tma_tensor_v)}")
+        print(f"tma_tensor_o: {cute.pretty_str(tma_tensor_o)}")
+        print(f"q_copy_size: {q_copy_size}")
+        print(f"k_copy_size: {k_copy_size}")
+        # Shared storage structure
+
+
         @cute.struct
         class SharedStorage:
             # Pipeline barriers
@@ -606,7 +641,29 @@ class LinearAttentionChunkwise:
         tOtO1 = cute.make_tensor(tOtO.iterator + self.tmem_o1_offset, tOtO.layout)       
 
         tP = cute.make_tensor(tStS.iterator, p_tmem_layout_staged.outer)
+        tPfragA = pv_thr_mma.make_fragment_A(tP)
 
+        print(f"sQ: {cute.pretty_str(sQ)}")
+        print(f"sK: {cute.pretty_str(sK)}")
+        print(f"sV: {cute.pretty_str(sV)}")
+        print(f"sO: {cute.pretty_str(sO)}")
+        print(f"qk_thr_mma: {cute.pretty_str(qk_thr_mma)}")
+        print(f"pv_thr_mma: {cute.pretty_str(pv_thr_mma)}")
+        print(f"kv_thr_mma: {cute.pretty_str(kv_thr_mma)}")
+        print(f"tSrQ: {cute.pretty_str(tSrQ)}")
+        print(f"tSrK: {cute.pretty_str(tSrK)}")
+        print(f"tSrV: {cute.pretty_str(tSrV)}")
+        print(f"tStS: {cute.pretty_str(tStS)}")
+        print(f"tOtO: {cute.pretty_str(tOtO)}")
+        print(f"qk_acc_shape: {cute.pretty_str(qk_acc_shape)}")
+        print(f"pv_acc_shape: {cute.pretty_str(pv_acc_shape)}")
+        print(f"tStS0: {tStS0}")
+        print(f"tStS1: {tStS1}")
+        print(f"tOtO0: {tOtO0}")
+        print(f"tOtO1: {tOtO1}")
+        print(f"tP: {cute.pretty_str(tP)}")
+        print(f"tPfragA: {cute.pretty_str(tPfragA)}")
+        
         # tOrP = pv_thr_mma.make_fragment_A(tP)[None, None, None, 0]
         # tOrP0 = cute.make_tensor(
         #    tOrP.iterator
