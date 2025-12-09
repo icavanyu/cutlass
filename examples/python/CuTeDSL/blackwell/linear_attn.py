@@ -708,10 +708,14 @@ class LinearAttentionChunkwise:
             seqlen_q = mQ_qdl.shape[0]
 
             # Local tile partition global tensors
+            # mQ_qdl_: (0,0,0,0) o (4096,128,(64,2)):(1@1,1@0,(1@2,1@3))
+            # gQ_qdl: (0,0,0,0) o (64,128,64,1,(64,2)):(1@1,1@0,64@1,128@0,(1@2,1@3))
             # (bM, bK, loopM, loopK, loopL)
             gQ_qdl = cute.flat_divide(
                 mQ_qdl_, cute.select(self.qk_mma_tiler, mode=[0, 2])
             )
+            # tSgQ_qdl: (0,0,0,0) o ((64,16),1,8,64,1,(64,2)):((1@1,1@0),0,16@0,64@1,128@0,(1@2,1@3))
+            # (MMA, MMA_Q, MMA_D, loopM, loopK, loopL)
             tSgQ_qdl = qk_thr_mma.partition_A(gQ_qdl)
 
             # Tiles the GMEM and SMEM tensors for the provided TMA Copy Atom.
@@ -762,8 +766,11 @@ class LinearAttentionChunkwise:
                 cute.printf("tSgK_kdl: {}", tSgK_kdl)
                 cute.printf("tSgV_dkl: {}", tSgV_dkl)
                 cute.printf("tQgQ: {}", tQgQ)
+                cute.printf("tQgQ_qdl: {}", tQgQ_qdl)
                 cute.printf("tKgK: {}", tKgK)
+                cute.printf("tKgK_kdl: {}", tKgK_kdl)
                 cute.printf("tVgV: {}", tVgV)
+                cute.printf("tVgV_dkl: {}", tVgV_dkl)
                 
             # TODO: Add for loop to load each Qi, Ki, Vi.
             for idx in cutlass.range(0, seqlen_q, chunk_size):
