@@ -192,10 +192,12 @@ class LinearAttentionChunkwise:
         """Compute tile scheduler parameters based on the chunk size and MMA tiler."""
         return (
             # S / CHUNK
-            cute.ceil_div(o_shape[0], chunk_size),
+            # cute.ceil_div(o_shape[0], chunk_size),
+            # For Loop to tile over chunk size,
+            1,
             # H
             cute.size(o_shape[2][0]),
-            # D
+            # B
             cute.size(o_shape[2][1]),
         )
         
@@ -433,7 +435,6 @@ class LinearAttentionChunkwise:
         print(f"k_copy_size: {k_copy_size}")
         # Shared storage structure
 
-
         @cute.struct
         class SharedStorage:
             # Pipeline barriers
@@ -508,7 +509,7 @@ class LinearAttentionChunkwise:
         tma_atom_k: cute.CopyAtom,
         mK_kdl: cute.Tensor,
         tma_atom_v: cute.CopyAtom,
-        mV_vdl: cute.Tensor,
+        mV_dkl: cute.Tensor,
         tma_atom_o: cute.CopyAtom,
         mO_odl: cute.Tensor,
         decay: cute.Pointer,
@@ -686,6 +687,8 @@ class LinearAttentionChunkwise:
         # )
         # self.cta_sync_barrier.arrive_and_wait()
 
+        self.num_regs_other = 32
+
         # ///////////////////////////////////////////////////////////////////////////////
         # LOAD WARP
         # ///////////////////////////////////////////////////////////////////////////////
@@ -694,24 +697,112 @@ class LinearAttentionChunkwise:
             
             # Load warp handles data loading for the entire chunk
             # Uses async copy or TMA to bring Q, K, V from global to shared memory
+
+            # chunk idx
+            (_, hidx, bidx) = cute.arch.block_idx()
+
+            mQ_qdl_ = mQ_qdl
+            mK_kdl_ = mK_kdl
+            mV_dkl_ = mV_dkl
+
+            seqlen_q = mQ_qdl.shape[0]
+
+            # Local tile partition global tensors
+            # (bM, bK, loopM, loopK, loopL)
+            gQ_qdl = cute.flat_divide(
+                mQ_qdl_, cute.select(self.qk_mma_tiler, mode=[0, 2])
+            )
+            tSgQ_qdl = qk_thr_mma.partition_A(gQ_qdl)
+
+            # Tiles the GMEM and SMEM tensors for the provided TMA Copy Atom.
+            tQsQ, tQgQ_qdl = cute.nvgpu.cpasync.tma_partition(
+                atom=tma_atom_q,
+                cta_coord=0, # no multicast
+                cta_layout=cute.make_layout(1),
+                smem_tensor=cute.group_modes(sQ, 0, 3),
+                gmem_tensor=cute.group_modes(tSgQ_qdl, 0, 3),
+            )
+            tQgQ = tQgQ_qdl[None, None, 0, bidx]
+
+            gK_kdl = cute.flat_divide(
+                mK_kdl_, cute.select(self.qk_mma_tiler, mode=[1, 2])
+            )
+            tSgK_kdl = qk_thr_mma.partition_B(gK_kdl)
+            tKsK, tKgK_kdl = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_k,
+                0,  # no multicast
+                cute.make_layout(1),
+                cute.group_modes(sK, 0, 3),
+                cute.group_modes(tSgK_kdl, 0, 3),
+            )
+            tKgK = tKgK_kdl[None, None, 0, curr_block_coord_kv[2]]
+
+            gV_dkl = cute.flat_divide(
+                mV_dkl_, cute.select(self.pv_mma_tiler, mode=[1, 2])
+            )
+            tSgV_dkl = pv_thr_mma.partition_B(gV_dkl)
+            tVsV, tVgV_dkl = cute.nvgpu.cpasync.tma_partition(
+                tma_atom_v,
+                0,  # no multicast
+                cute.make_layout(1),
+                cute.group_modes(sV, 0, 3),
+                cute.group_modes(tSgV_dkl, 0, 3),
+            )
+            tVgV = tVgV_dkl[None, 0, None, bidx]
+
+            if tidx == 0:
+                cute.printf(f"mQ_qdl_: {cute.pretty_str(mQ_qdl_)}")
+                cute.printf(f"mK_kdl_: {cute.pretty_str(mK_kdl_)}")
+                cute.printf(f"mV_dkl_: {cute.pretty_str(mV_dkl_)}")
+                cute.printf(f"gQ_qdl: {cute.pretty_str(gQ_qdl)}")
+                cute.printf(f"gK_kdl: {cute.pretty_str(gK_kdl)}")
+                cute.printf(f"gV_dkl: {cute.pretty_str(gV_dkl)}")
+                cute.printf(f"tSgQ_qdl: {cute.pretty_str(tSgQ_qdl)}")
+                cute.printf(f"tSgK_kdl: {cute.pretty_str(tSgK_kdl)}")
+                cute.printf(f"tSgV_dkl: {cute.pretty_str(tSgV_dkl)}")
+                cute.printf(f"tQgQ: {cute.pretty_str(tQgQ)}")
+                cute.printf(f"tKgK: {cute.pretty_str(tKgK)}")
+                cute.printf(f"tVgV: {cute.pretty_str(tVgV)}")
+                
+            # TODO: Add for loop to load each Qi, Ki, Vi.
+            for idx in cutlass.range(0, seqlen_q, chunk_size):
+                pass
+
+            # Q0
+            q0_coord = cidx
+            q0_handle = load_q_producer.acquire_and_advance()
+            cute.copy(
+                atom=tma_atom_q,
+                src=tQgQ[None, q0_coord], # source
+                dst=tQsQ[None, q0_handle.index], # which stage
+                tma_bar_ptr=q0_handle.barrier,
+            )
+
+            # K0
+            k_handle = load_k_producer.acquire_and_advance()
+            cute.copy(
+                atom=tma_atom_k,
+                src=tKgK[None, idx],
+                dst=tKsK[None, k_handle.index],
+                tma_bar_ptr=k_handle.barrier,
+            )
             
-            # In a real implementation with TMA:
-            # 1. Setup TMA descriptors for Q, K, V tensors
-            # 2. Prefetch TMA descriptors (done outside kernel)
-            # 3. For each chunk:
-            #    a. Initiate TMA loads for Q, K, V of current chunk
-            #    b. Wait for completion via mbarriers
-            #    c. Signal to compute warps via barrier
+            # V0
+            v_handle = load_v_producer.acquire_and_advance()
+            cute.copy(
+                atom=tma_atom_v,
+                src=tVgV[None, idx],
+                dst=tVsV[None, v_handle.index],
+                tma_bar_ptr=v_handle.barrier,
+            )
             
-            # Simplified version: just synchronize with other warps
-            # Real implementation would have TMA copy logic here
-            pass
+            # Number of chunks to process
+            num_chunks = (seqlen_q + chunk_size - 1) // chunk_size
         
         # ///////////////////////////////////////////////////////////////////////////////
         # COMPUTE WARPS
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.mma_warp_id:
-            
             # Compute warp group processes chunkwise linear attention
             # Each warp computes a portion of the sequence in chunks
             
