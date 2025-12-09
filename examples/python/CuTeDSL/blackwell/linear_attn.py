@@ -707,6 +707,22 @@ class LinearAttentionChunkwise:
 
             seqlen_q = mQ_qdl.shape[0]
 
+            # mQ_qdl_: (0,0,0,0) o (4096,128,(64,2)):(1@1,1@0,(1@2,1@3))
+            # mK_kdl_: (0,0,0,0) o (4096,128,(64,2)):(1@1,1@0,(1@2,1@3))
+            # mV_dkl_: (0,0,0,0) o (128,4096,(64,2)):(1@0,1@1,(1@2,1@3))
+            # gQ_qdl: (0,0,0,0) o (64,128,64,1,(64,2)):(1@1,1@0,64@1,128@0,(1@2,1@3))
+            # gK_kdl: (0,0,0,0) o (64,128,64,1,(64,2)):(1@1,1@0,64@1,128@0,(1@2,1@3))
+            # gV_dkl: (0,0,0,0) o (128,64,1,64,(64,2)):(1@0,1@1,128@0,64@1,(1@2,1@3))
+            # tSgQ_qdl: (0,0,0,0) o ((64,16),1,8,64,1,(64,2)):((1@1,1@0),0,16@0,64@1,128@0,(1@2,1@3))
+            # tSgK_kdl: (0,0,0,0) o ((64,16),1,8,64,1,(64,2)):((1@1,1@0),0,16@0,64@1,128@0,(1@2,1@3))
+            # tSgV_dkl: (0,0,0,0) o ((128,16),1,4,1,64,(64,2)):((1@0,1@1),0,16@1,128@0,64@1,(1@2,1@3))
+            # tQgQ: (0,0,0,0) o (((64,64),2),64):(((1@0,1@1),64@0),64@1)
+            # tQgQ_qdl: (0,0,0,0) o (((64,64),2),64,1,(64,2)):(((1@0,1@1),64@0),64@1,128@0,(1@2,1@3))
+            # tKgK: (0,0,0,0) o (((64,64),2),64):(((1@0,1@1),64@0),64@1)
+            # tKgK_kdl: (0,0,0,0) o (((64,64),2),64,1,(64,2)):(((1@0,1@1),64@0),64@1,128@0,(1@2,1@3))
+            # tVgV: (0,0,0,0) o (((64,64),2),64):(((1@0,1@1),64@0),64@1)
+            # tVgV_dkl: (0,0,0,0) o (((64,64),2),1,64,(64,2)):(((1@0,1@1),64@0),128@0,64@1,(1@2,1@3))
+
             # Local tile partition global tensors
             # mQ_qdl_: (0,0,0,0) o (4096,128,(64,2)):(1@1,1@0,(1@2,1@3))
             # gQ_qdl: (0,0,0,0) o (64,128,64,1,(64,2)):(1@1,1@0,64@1,128@0,(1@2,1@3))
@@ -719,6 +735,10 @@ class LinearAttentionChunkwise:
             tSgQ_qdl = qk_thr_mma.partition_A(gQ_qdl)
 
             # Tiles the GMEM and SMEM tensors for the provided TMA Copy Atom.
+            # sQ: tensor<ptr<bf16, smem, align<1024>, S<3,4,3>> o ((64,16),1,(4,2),2):((64,1),0,(16,4096),8192)>
+            # tSgQ_qdl: (0,0,0,0) o ((64,16),1,8,64,1,(64,2)):((1@1,1@0),0,16@0,64@1,128@0,(1@2,1@3))
+            # tQgQ_qdl: (0,0,0,0) o (((64,64),2),64,1,(64,2)):(((1@0,1@1),64@0),64@1,128@0,(1@2,1@3))
+            # tQgQ: (0,0,0,0) o (((64,64),2),64):(((1@0,1@1),64@0),64@1)
             tQsQ, tQgQ_qdl = cute.nvgpu.cpasync.tma_partition(
                 atom=tma_atom_q,
                 cta_coord=0, # no multicast
@@ -762,9 +782,15 @@ class LinearAttentionChunkwise:
                 cute.printf("gQ_qdl: {}", gQ_qdl)
                 cute.printf("gK_kdl: {}", gK_kdl)
                 cute.printf("gV_dkl: {}", gV_dkl)
+
                 cute.printf("tSgQ_qdl: {}", tSgQ_qdl)
                 cute.printf("tSgK_kdl: {}", tSgK_kdl)
                 cute.printf("tSgV_dkl: {}", tSgV_dkl)
+
+                cute.printf("tQsQ: {}", tQsQ)
+                cute.printf("tKsK: {}", tKsK)
+                cute.printf("tVsV: {}", tVsV)
+
                 cute.printf("tQgQ: {}", tQgQ)
                 cute.printf("tQgQ_qdl: {}", tQgQ_qdl)
                 cute.printf("tKgK: {}", tKgK)
