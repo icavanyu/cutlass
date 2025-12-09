@@ -751,19 +751,19 @@ class LinearAttentionChunkwise:
             tVgV = tVgV_dkl[None, 0, None, bidx]
 
             if tidx == self.load_warp_id * self.threads_per_warp:
-                cute.printf("tidx:", tidx)
-                cute.printf("mQ_qdl_", mQ_qdl_)
-                cute.printf("mK_kdl_", mK_kdl_)
-                cute.printf("mV_dkl_", mV_dkl_)
-                cute.printf("gQ_qdl", gQ_qdl)
-                cute.printf("gK_kdl", gK_kdl)
-                cute.printf("gV_dkl", gV_dkl)
-                cute.printf("tSgQ_qdl", tSgQ_qdl)
-                cute.printf("tSgK_kdl", tSgK_kdl)
-                cute.printf("tSgV_dkl", tSgV_dkl)
-                cute.printf("tQgQ", tQgQ)
-                cute.printf("tKgK", tKgK)
-                cute.printf("tVgV", tVgV)
+                cute.printf("tidx: {}", tidx)
+                cute.printf("mQ_qdl_: {}", mQ_qdl_)
+                cute.printf("mK_kdl_: {}", mK_kdl_)
+                cute.printf("mV_dkl_: {}", mV_dkl_)
+                cute.printf("gQ_qdl: {}", gQ_qdl)
+                cute.printf("gK_kdl: {}", gK_kdl)
+                cute.printf("gV_dkl: {}", gV_dkl)
+                cute.printf("tSgQ_qdl: {}", tSgQ_qdl)
+                cute.printf("tSgK_kdl: {}", tSgK_kdl)
+                cute.printf("tSgV_dkl: {}", tSgV_dkl)
+                cute.printf("tQgQ: {}", tQgQ)
+                cute.printf("tKgK: {}", tKgK)
+                cute.printf("tVgV: {}", tVgV)
                 
             # TODO: Add for loop to load each Qi, Ki, Vi.
             for idx in cutlass.range(0, seqlen_q, chunk_size):
