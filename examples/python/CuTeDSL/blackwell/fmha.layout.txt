@@ -1,0 +1,61 @@
+Running Blackwell SM100 FMHA test with:
+  q_shape: (1, 256, 8, 128)
+  k_shape: (1, 256, 8, 128)
+  in_dtype: Float16
+  out_dtype: Float16
+  qk_acc_dtype: Float32
+  pv_acc_dtype: Float32
+  mma_tiler_mn: (128, 128)
+  is_persistent: False
+  is_causal: False
+  bottom_right_align: False
+  lse_calculation: False
+  window_size: (-1, -1)
+  scale_q: 1.0
+  scale_k: 1.0
+  scale_v: 1.0
+  inv_scale_o: 1.0
+  scale_softmax: 0.0
+  tolerance: 0.1
+  warmup_iterations: 0
+  iterations: 1
+  skip_ref_check: False
+  use_cold_l2: False
+Compiling kernel with cute.compile ...
+sQ: tensor<ptr<f16, smem, align<1024>, S<3,4,3>> o ((128,16),1,(4,2),2):((64,1),0,(16,8192),16384)>
+sK: tensor<ptr<f16, smem, align<1024>, S<3,4,3>> o ((128,16),1,(4,2),3):((64,1),0,(16,8192),16384)>
+sV: tensor<ptr<f16, smem, align<1024>, S<3,4,3>> o (((64,2),16),1,8,3):(((1,8192),64),0,1024,16384)>
+sO: tensor<ptr<f16, smem, align<1024>, S<3,4,3>> o ((8,16),(64,2),(1,2)):((64,512),(1,8192),(0,16384))>
+qk_thr_mma: Tiled MMA
+  Thr Layout VMNK: (1,1,1,1):(0,0,0,0)
+  Permutation MNK: (_,_,_)
+MMA Atom
+  ThrID:           1:0
+  Shape MNK:       (128,128,16)
+  TV Layout A:     (1,(128,16)):(128,(1,128))
+  TV Layout B:     (1,(128,16)):(128,(1,128))
+  TV Layout C:     (1,(128,128)):(128,(1,128))
+pv_thr_mma: Tiled MMA
+  Thr Layout VMNK: (1,1,1,1):(0,0,0,0)
+  Permutation MNK: (_,_,_)
+MMA Atom
+  ThrID:           1:0
+  Shape MNK:       (128,128,16)
+  TV Layout A:     (1,(128,16)):(128,(1,128))
+  TV Layout B:     (1,(128,16)):(128,(1,128))
+  TV Layout C:     (1,(128,128)):(128,(1,128))
+tSrQ: tensor<Value(%1190 = "cute.get_iter"(%1189) : (!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, "(1,1,(4,2),2):(0,0,(2,1024),2048)">) -> !cute_nvgpu.smem_desc) o (1,1,(4,2),2):(0,0,(2,1024),2048)>
+tSrK: tensor<Value(%1193 = "cute.get_iter"(%1192) : (!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, "(1,1,(4,2),3):(0,0,(2,1024),2048)">) -> !cute_nvgpu.smem_desc) o (1,1,(4,2),3):(0,0,(2,1024),2048)>
+tStS: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+tOtO: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+qk_acc_shape: ((128,128),1,1)
+pv_acc_shape: ((128,128),1,1)
+tStS0: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+tStS1: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+tOtO0: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+tOtO1: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+tP: tensor<ptr<f32, tmem, align<1>> o ((128,16),1,(4,2),1):((64,1),0,(16,8192),0)>
+Compilation time: 3.9554 seconds
+Verifying results...
+Results verified successfully!
+PASS

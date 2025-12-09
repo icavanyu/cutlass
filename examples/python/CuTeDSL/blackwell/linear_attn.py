@@ -750,7 +750,7 @@ class LinearAttentionChunkwise:
             )
             tVgV = tVgV_dkl[None, 0, None, bidx]
 
-            if tidx == self.load_warp_id * self.threads_per_warp:
+            if bidx == 0 and hidx == 0 and tidx == self.load_warp_id * self.threads_per_warp:
                 cute.printf("tidx: {}", tidx)
                 cute.printf("mQ_qdl_: {}", mQ_qdl_)
                 cute.printf("mK_kdl_: {}", mK_kdl_)
