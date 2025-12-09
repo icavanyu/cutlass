@@ -737,6 +737,7 @@ class LinearAttentionChunkwise:
             # Tiles the GMEM and SMEM tensors for the provided TMA Copy Atom.
             # sQ: tensor<ptr<bf16, smem, align<1024>, S<3,4,3>> o ((64,16),1,(4,2),2):((64,1),0,(16,4096),8192)>
             # tSgQ_qdl: (0,0,0,0) o ((64,16),1,8,64,1,(64,2)):((1@1,1@0),0,16@0,64@1,128@0,(1@2,1@3))
+            # tQsQ: raw_ptr(0x0000000000010800: bf16, smem, align<1024>) o ((4096,2),2):((1,4096),8192)
             # tQgQ_qdl: (0,0,0,0) o (((64,64),2),64,1,(64,2)):(((1@0,1@1),64@0),64@1,128@0,(1@2,1@3))
             # tQgQ: (0,0,0,0) o (((64,64),2),64):(((1@0,1@1),64@0),64@1)
             tQsQ, tQgQ_qdl = cute.nvgpu.cpasync.tma_partition(
@@ -797,6 +798,12 @@ class LinearAttentionChunkwise:
                 cute.printf("tKgK_kdl: {}", tKgK_kdl)
                 cute.printf("tVgV: {}", tVgV)
                 cute.printf("tVgV_dkl: {}", tVgV_dkl)
+
+                smem_tensor=cute.group_modes(sQ, 0, 3),
+                gmem_tensor=cute.group_modes(tSgQ_qdl, 0, 3),
+
+                cute.printf("smem_tensor: {}", smem_tensor)
+                cute.printf("gmem_tensor: {}", gmem_tensor)
                 
             # TODO: Add for loop to load each Qi, Ki, Vi.
             for idx in cutlass.range(0, seqlen_q, chunk_size):
