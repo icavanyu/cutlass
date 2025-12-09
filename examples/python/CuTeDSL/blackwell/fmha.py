@@ -797,6 +797,8 @@ class BlackwellFusedMultiHeadAttentionForward:
         )
         self.cta_sync_barrier.arrive_and_wait()
 
+        cute.printf(f"tidx: {cute.pretty_str(tidx)}")
+
         print(f"sQ: {cute.pretty_str(sQ)}")
         print(f"sK: {cute.pretty_str(sK)}")
         print(f"sV: {cute.pretty_str(sV)}")

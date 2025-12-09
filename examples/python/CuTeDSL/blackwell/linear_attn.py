@@ -699,7 +699,7 @@ class LinearAttentionChunkwise:
             # Uses async copy or TMA to bring Q, K, V from global to shared memory
 
             # chunk idx
-            (_, hidx, bidx) = cute.arch.block_idx()
+            (cidx, hidx, bidx) = cute.arch.block_idx()
 
             mQ_qdl_ = mQ_qdl
             mK_kdl_ = mK_kdl
@@ -735,7 +735,7 @@ class LinearAttentionChunkwise:
                 cute.group_modes(sK, 0, 3),
                 cute.group_modes(tSgK_kdl, 0, 3),
             )
-            tKgK = tKgK_kdl[None, None, 0, curr_block_coord_kv[2]]
+            tKgK = tKgK_kdl[None, None, 0, bidx]
 
             gV_dkl = cute.flat_divide(
                 mV_dkl_, cute.select(self.pv_mma_tiler, mode=[1, 2])
@@ -750,19 +750,20 @@ class LinearAttentionChunkwise:
             )
             tVgV = tVgV_dkl[None, 0, None, bidx]
 
-            if tidx == 0:
-                cute.printf(f"mQ_qdl_: {cute.pretty_str(mQ_qdl_)}")
-                cute.printf(f"mK_kdl_: {cute.pretty_str(mK_kdl_)}")
-                cute.printf(f"mV_dkl_: {cute.pretty_str(mV_dkl_)}")
-                cute.printf(f"gQ_qdl: {cute.pretty_str(gQ_qdl)}")
-                cute.printf(f"gK_kdl: {cute.pretty_str(gK_kdl)}")
-                cute.printf(f"gV_dkl: {cute.pretty_str(gV_dkl)}")
-                cute.printf(f"tSgQ_qdl: {cute.pretty_str(tSgQ_qdl)}")
-                cute.printf(f"tSgK_kdl: {cute.pretty_str(tSgK_kdl)}")
-                cute.printf(f"tSgV_dkl: {cute.pretty_str(tSgV_dkl)}")
-                cute.printf(f"tQgQ: {cute.pretty_str(tQgQ)}")
-                cute.printf(f"tKgK: {cute.pretty_str(tKgK)}")
-                cute.printf(f"tVgV: {cute.pretty_str(tVgV)}")
+            if tidx == self.load_warp_id * self.threads_per_warp:
+                cute.printf("tidx:", tidx)
+                cute.printf("mQ_qdl_", mQ_qdl_)
+                cute.printf("mK_kdl_", mK_kdl_)
+                cute.printf("mV_dkl_", mV_dkl_)
+                cute.printf("gQ_qdl", gQ_qdl)
+                cute.printf("gK_kdl", gK_kdl)
+                cute.printf("gV_dkl", gV_dkl)
+                cute.printf("tSgQ_qdl", tSgQ_qdl)
+                cute.printf("tSgK_kdl", tSgK_kdl)
+                cute.printf("tSgV_dkl", tSgV_dkl)
+                cute.printf("tQgQ", tQgQ)
+                cute.printf("tKgK", tKgK)
+                cute.printf("tVgV", tVgV)
                 
             # TODO: Add for loop to load each Qi, Ki, Vi.
             for idx in cutlass.range(0, seqlen_q, chunk_size):
@@ -782,7 +783,7 @@ class LinearAttentionChunkwise:
             k_handle = load_k_producer.acquire_and_advance()
             cute.copy(
                 atom=tma_atom_k,
-                src=tKgK[None, idx],
+                src=tKgK[None, cidx],
                 dst=tKsK[None, k_handle.index],
                 tma_bar_ptr=k_handle.barrier,
             )
@@ -791,7 +792,7 @@ class LinearAttentionChunkwise:
             v_handle = load_v_producer.acquire_and_advance()
             cute.copy(
                 atom=tma_atom_v,
-                src=tVgV[None, idx],
+                src=tVgV[None, cidx],
                 dst=tVsV[None, v_handle.index],
                 tma_bar_ptr=v_handle.barrier,
             )
