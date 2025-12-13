@@ -324,8 +324,8 @@ class LinearAttentionChunkwise:
         kt = cute.make_tensor(k_iter, kt_layout)
         # v
         v_layout = cute.make_layout(
-            (S, D, (H,B)),
-            stride=(D*H, 1, (D, D*H*S)),
+            (D, S, (H,B)),
+            stride=(1, D*H, (D, D*H*S)),
         )
         v = cute.make_tensor(v_iter, v_layout)
         # (S, D, (H,B))
@@ -352,17 +352,13 @@ class LinearAttentionChunkwise:
         self.v_major_mode = utils.LayoutEnum.from_tensor(v).mma_major_mode()
         self.o_layout = utils.LayoutEnum.from_tensor(o)
 
-        # self.q_major_mode = tcgen05.OperandMajorMode.K
-        # self.k_major_mode = tcgen05.OperandMajorMode.K
-        # self.v_major_mode = tcgen05.OperandMajorMode.MN
-
         if cutlass.const_expr(self.q_major_mode != tcgen05.OperandMajorMode.K):
             raise RuntimeError("The layout of q is not supported")
         if cutlass.const_expr(self.k_major_mode != tcgen05.OperandMajorMode.K):
             raise RuntimeError("The layout of k is not supported")
         if cutlass.const_expr(self.kt_major_mode != tcgen05.OperandMajorMode.MN):
             raise RuntimeError("The layout of kt is not supported")
-        if cutlass.const_expr(self.v_major_mode != tcgen05.OperandMajorMode.K):
+        if cutlass.const_expr(self.v_major_mode != tcgen05.OperandMajorMode.MN):
             raise RuntimeError("The layout of v is not supported")
 
         qk_tiled_mma = sm100_utils.make_trivial_tiled_mma(
@@ -441,8 +437,8 @@ class LinearAttentionChunkwise:
             self.acc_stage,
         )
         v_smem_layout_staged = sm100_utils.make_smem_layout_b(
-            kv_tiled_mma,
-            self.kv_mma_tiler,
+            pv_tiled_mma,
+            self.pv_mma_tiler,
             self.v_dtype,
             self.v_stage,
         )
@@ -482,7 +478,7 @@ class LinearAttentionChunkwise:
         kt_smem_layout = cute.select(kt_smem_layout_staged, mode=[0, 1, 2])
         tma_atom_kt, tma_tensor_kt = cute.nvgpu.make_tiled_tma_atom_A(
             tma_load_op,
-            k,
+            kt,
             kt_smem_layout,
             self.kv_mma_tiler,
             kv_tiled_mma,
@@ -494,8 +490,8 @@ class LinearAttentionChunkwise:
             tma_load_op,
             v,
             v_smem_layout,
-            self.kv_mma_tiler,
-            kv_tiled_mma,
+            self.pv_mma_tiler,
+            pv_tiled_mma,
             self.cluster_layout_vmnk.shape,
         )
 
@@ -538,10 +534,12 @@ class LinearAttentionChunkwise:
         print(f"p_tmem_layout_staged: {cute.pretty_str(p_tmem_layout_staged)}")
         print(f"tma_atom_q: {cute.pretty_str(tma_atom_q)}")
         print(f"tma_atom_k: {cute.pretty_str(tma_atom_k)}")
+        print(f"tma_atom_kt: {cute.pretty_str(tma_atom_kt)}")
         print(f"tma_atom_v: {cute.pretty_str(tma_atom_v)}")
         print(f"tma_atom_o: {cute.pretty_str(tma_atom_o)}")
         print(f"tma_tensor_q: {cute.pretty_str(tma_tensor_q)}")
         print(f"tma_tensor_k: {cute.pretty_str(tma_tensor_k)}")
+        print(f"tma_tensor_kt: {cute.pretty_str(tma_tensor_kt)}")
         print(f"tma_tensor_v: {cute.pretty_str(tma_tensor_v)}")
         print(f"tma_tensor_o: {cute.pretty_str(tma_tensor_o)}")
         print(f"q_copy_size: {q_copy_size}")
@@ -622,6 +620,33 @@ class LinearAttentionChunkwise:
         )
 
     @cute.kernel
+    def kernel_(
+        self,
+        qk_tiled_mma: cute.TiledMma,
+        kv_tiled_mma: cute.TiledMma,
+        pv_tiled_mma: cute.TiledMma,
+        tma_atom_q: cute.CopyAtom,
+        mQ_qdl: cute.Tensor,
+        tma_atom_k: cute.CopyAtom,
+        mK_kdl: cute.Tensor,
+        tma_atom_kt: cute.CopyAtom,
+        tma_tensor_kt: cute.Tensor,
+        tma_atom_v: cute.CopyAtom,
+        mV_dkl: cute.Tensor,
+        tma_atom_o: cute.CopyAtom,
+        mO_qdl: cute.Tensor,
+        decay: cute.Pointer,
+        q_smem_layout_staged: cute.ComposedLayout,
+        k_smem_layout_staged: cute.ComposedLayout,
+        kt_smem_layout_staged: cute.ComposedLayout,
+        v_smem_layout_staged: cute.ComposedLayout,
+        o_smem_layout_staged: cute.ComposedLayout,
+        p_tmem_layout_staged: cute.ComposedLayout,
+        chunk_size: int,
+    ):
+        return
+
+    @cute.kernel
     def kernel(
         self,
         qk_tiled_mma: cute.TiledMma,
@@ -676,6 +701,7 @@ class LinearAttentionChunkwise:
         if warp_idx == self.load_warp_id:
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_q)
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_k)
+            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_kt)
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_v)
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_o)
 
@@ -721,7 +747,7 @@ class LinearAttentionChunkwise:
         ).make_participants()
         decay_producer, decay_consumer = pipeline.PipelineUmmaAsync.create(
             num_stages=self.decay_stage,
-            producer_group=make_thread_cooperative_group(len([self.decay_warp_id])),
+            producer_group=make_thread_cooperative_group(len(self.decay_warp_ids)),
             consumer_group=make_thread_cooperative_group(
                 self.threads_per_warp * len([self.mma_warp_id])
             ),
@@ -775,58 +801,54 @@ class LinearAttentionChunkwise:
         )
 
         # 1-CTA
-        # qk_thr_mma = qk_tiled_mma.get_slice(0)
-        # pv_thr_mma = pv_tiled_mma.get_slice(0)
-        # kv_thr_mma = kv_tiled_mma.get_slice(0)
+        qk_thr_mma = qk_tiled_mma.get_slice(0)
+        pv_thr_mma = pv_tiled_mma.get_slice(0)
+        kv_thr_mma = kv_tiled_mma.get_slice(0)
 
-        # # MMA SMEM descriptors
-        # tSrQ = qk_thr_mma.make_fragment_A(sQ)
-        # tSrK = qk_thr_mma.make_fragment_B(sK)
-        # tSrV = pv_thr_mma.make_fragment_B(sV)
-        # # tSrKT = kv_thr_mma.make_fragment_A(sKT)
+        # MMA SMEM descriptors
+        tSrQ = qk_thr_mma.make_fragment_A(sQ)
+        tSrK = qk_thr_mma.make_fragment_B(sK)
+        tSrV = pv_thr_mma.make_fragment_B(sV)
+        # tSrKT = kv_thr_mma.make_fragment_A(sKT)
 
-        # # (MMA, 1, 1)
-        # # qk_acc_shape: ((64,64),1,1)
-        # qk_acc_shape = qk_thr_mma.partition_shape_C(
-        #     (self.qk_mma_tiler[0], self.qk_mma_tiler[1])
-        # )
-        # # qk fragment C
-        # # tStS: tensor<ptr<f32, tmem, align<1>> o (((16,4),64),1,1):(((65536,2097152),1),0,0)>
-        # # Create tmem for S = QK
-        # tStS = qk_thr_mma.make_fragment_C(qk_acc_shape)
+        # (MMA, 1, 1)
+        # qk_acc_shape: ((64,64),1,1)
+        qk_acc_shape = qk_thr_mma.partition_shape_C(
+            (self.qk_mma_tiler[0], self.qk_mma_tiler[1])
+        )
+        # qk fragment C
+        # tStS: tensor<ptr<f32, tmem, align<1>> o (((16,4),64),1,1):(((65536,2097152),1),0,0)>
+        # Create tmem for S = QK
+        tStS = qk_thr_mma.make_fragment_C(qk_acc_shape)
 
-        # # pv_acc_shape: ((128,128),1,1)
-        # pv_acc_shape = pv_thr_mma.partition_shape_C(
-        #     (self.pv_mma_tiler[0], self.pv_mma_tiler[1])
-        # )
-        # # tOtO: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
-        # # Create tmem for O = PV
-        # tOtO = pv_thr_mma.make_fragment_C(pv_acc_shape)
+        # pv_acc_shape: ((128,128),1,1)
+        pv_acc_shape = pv_thr_mma.partition_shape_C(
+            (self.pv_mma_tiler[0], self.pv_mma_tiler[1])
+        )
+        # tOtO: tensor<ptr<f32, tmem, align<1>> o ((128,128),1,1):((65536,1),0,0)>
+        # Create tmem for O = PV
+        tOtO = pv_thr_mma.make_fragment_C(pv_acc_shape)
 
-        # tStS0 = cute.make_tensor(tStS.iterator + self.tmem_qk_cols_offset, tStS.layout)
+        tStS0 = cute.make_tensor(tStS.iterator + self.tmem_qk_cols_offset, tStS.layout)
 
-        # tP = cute.make_tensor(tStS.iterator, p_tmem_layout_staged.outer)
+        tP = cute.make_tensor(tStS.iterator, p_tmem_layout_staged.outer)
 
-        # print(f"sQ: {cute.pretty_str(sQ)}")
-        # print(f"sK: {cute.pretty_str(sK)}")
-        # print(f"sV: {cute.pretty_str(sV)}")
-        # print(f"sO: {cute.pretty_str(sO)}")
-        # print(f"qk_thr_mma: {cute.pretty_str(qk_thr_mma)}")
-        # print(f"pv_thr_mma: {cute.pretty_str(pv_thr_mma)}")
-        # print(f"kv_thr_mma: {cute.pretty_str(kv_thr_mma)}")
-        # print(f"tSrQ: {cute.pretty_str(tSrQ)}")
-        # print(f"tSrK: {cute.pretty_str(tSrK)}")
-        # print(f"tSrV: {cute.pretty_str(tSrV)}")
-        # print(f"tStS: {cute.pretty_str(tStS)}")
-        # print(f"tOtO: {cute.pretty_str(tOtO)}")
-        # print(f"qk_acc_shape: {cute.pretty_str(qk_acc_shape)}")
-        # print(f"pv_acc_shape: {cute.pretty_str(pv_acc_shape)}")
-        # print(f"tStS0: {tStS0}")
-        # # print(f"tStS1: {tStS1}")
-        # # print(f"tOtO0: {tOtO0}")
-        # # print(f"tOtO1: {tOtO1}")
-        # print(f"tP: {cute.pretty_str(tP)}")
-        # print(f"tPfragA: {cute.pretty_str(tPfragA)}")
+        print(f"sQ: {cute.pretty_str(sQ)}")
+        print(f"sK: {cute.pretty_str(sK)}")
+        print(f"sV: {cute.pretty_str(sV)}")
+        print(f"sO: {cute.pretty_str(sO)}")
+        print(f"qk_thr_mma: {cute.pretty_str(qk_thr_mma)}")
+        print(f"pv_thr_mma: {cute.pretty_str(pv_thr_mma)}")
+        print(f"kv_thr_mma: {cute.pretty_str(kv_thr_mma)}")
+        print(f"tSrQ: {cute.pretty_str(tSrQ)}")
+        print(f"tSrK: {cute.pretty_str(tSrK)}")
+        print(f"tSrV: {cute.pretty_str(tSrV)}")
+        print(f"tStS: {cute.pretty_str(tStS)}")
+        print(f"tOtO: {cute.pretty_str(tOtO)}")
+        print(f"qk_acc_shape: {cute.pretty_str(qk_acc_shape)}")
+        print(f"pv_acc_shape: {cute.pretty_str(pv_acc_shape)}")
+        print(f"tStS0: {tStS0}")
+        print(f"tP: {cute.pretty_str(tP)}")
 
         self.num_regs_other = 24
         self.num_regs_uniform_warps = 24
@@ -1045,6 +1067,7 @@ class LinearAttentionChunkwise:
 
         return
 
+    @cute.jit
     def mma_partition_ss(
         self,
         tiled_mma,
@@ -1064,6 +1087,7 @@ class LinearAttentionChunkwise:
         )
         return tCrA, tCrB, tCtAcc
 
+    @cute.jit
     def mma_partition_ts(
         self,
         tiled_mma,
@@ -1084,6 +1108,7 @@ class LinearAttentionChunkwise:
         )
         return tCrA, tCrB, tCtAcc
 
+    @cute.jit
     def mma_partition_a_tmem(self, tiled_mma, a_tmem_layout, tmem_a_ptr):
         tCrA_fake = tiled_mma.make_fragment_A(a_tmem_layout.outer.shape)
         tCrA = cute.make_tensor(
@@ -1095,6 +1120,7 @@ class LinearAttentionChunkwise:
         )
         return tCrA
 
+    @cute.jit
     def mma_partition_c(self, tiled_mma, tile_shape_mnk, tmem_acc_ptr, acc_stages):
         acc_shape = tiled_mma.partition_shape_C(tile_shape_mnk[:2])
         tCtAcc_fake = tiled_mma.make_fragment_C(cute.append(acc_shape, acc_stages))
@@ -1129,6 +1155,7 @@ class LinearAttentionChunkwise:
             )
         return tiled_mma
 
+    @cute.jit
     def tma_partition_for_mma_operand(
         self,
         tma_atom_x,
