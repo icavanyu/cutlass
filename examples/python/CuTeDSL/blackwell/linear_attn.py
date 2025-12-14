@@ -304,16 +304,16 @@ class LinearAttentionChunkwise:
         )
         k = cute.make_tensor(k_iter, k_layout)
         # kt
-        kt_layout = cute.make_layout(
-            (S, D, (H,B)),
-            stride=(D*H, 1, (D, D*H*S)),
-        )
-        kt = cute.make_tensor(k_iter, kt_layout)
         # kt_layout = cute.make_layout(
-        #     (D, S, (H,B)),
-        #     stride=(1, D*H, (D, D*H*S)),
+        #     (S, D, (H,B)),
+        #     stride=(D*H, 1, (D, D*H*S)),
         # )
         # kt = cute.make_tensor(k_iter, kt_layout)
+        kt_layout = cute.make_layout(
+            (D, S, (H,B)),
+            stride=(1, D*H, (D, D*H*S)),
+        )
+        kt = cute.make_tensor(k_iter, kt_layout)
         # v
         v_layout = cute.make_layout(
             (D, S, (H,B)),
@@ -362,14 +362,13 @@ class LinearAttentionChunkwise:
             self.qk_mma_tiler[:2],
         )
         kv_tiled_mma = sm100_utils.make_trivial_tiled_mma(
-            self.v_dtype,
+            self.k_dtype,
             self.kt_major_mode,
             self.v_major_mode,
             self.kv_acc_dtype,
             self.cta_group,
             self.kv_mma_tiler[:2],
         )
-        print(f"kv_mma_tiler[:2] = {self.kv_mma_tiler[:2]}")
         p_major_mode = tcgen05.OperandMajorMode.K
         pv_tiled_mma = sm100_utils.make_trivial_tiled_mma(
             self.v_dtype,
@@ -556,7 +555,6 @@ class LinearAttentionChunkwise:
             p_mbar_ptr: cute.struct.MemRange[Int64, self.acc_stage * 2] # type: ignore
             o_intra_mbar_ptr: cute.struct.MemRange[Int64, self.acc_stage * 2] # type: ignore
             o_inter_mbar_ptr: cute.struct.MemRange[Int64, self.acc_stage * 2] # type: ignore
-            o_acc_mbar_ptr: cute.struct.MemRange[Int64, self.epi_stage * 2] # type: ignore
             # Tmem holding buffer
             tmem_holding_buf: Int32
             # Smem tensors
@@ -905,15 +903,16 @@ class LinearAttentionChunkwise:
                 # KTi
                 # SRC: ((ATOM_V, REST_V), TILES_N, TILES_K)
                 # DST: ((ATOM_V, REST_V), INPUT_STAGE)
-                ### kt_handle = load_kt_producer.acquire_and_advance()
-                ### if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                ###     cute.printf("kt producer: idx={}", idx)
-                ### cute.copy(
-                ###     atom=tma_atom_kt,
-                ###     src=tKgKT[None, idx, 0],
-                ###     dst=tKsKT[None, kt_handle.index],
-                ###     tma_bar_ptr=kt_handle.barrier,
-                ### )
+                # TODO: check layout
+                kt_handle = load_kt_producer.acquire_and_advance()
+                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                    cute.printf("kt producer: idx={}", idx)
+                cute.copy(
+                    atom=tma_atom_kt,
+                    src=tKgKT[None, idx, 0],
+                    dst=tKsKT[None, kt_handle.index],
+                    tma_bar_ptr=kt_handle.barrier,
+                )
 
                 # Vi
                 # SRC: ((ATOM_V, REST_V), TILES_M, TILES_K)
@@ -1019,27 +1018,27 @@ class LinearAttentionChunkwise:
 
                 # Produce new_state
                 # Wait for Ki^T
-                ### if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                ###     cute.printf("-- begin wait for kt consumer: idx={}", idx)
-                ### kt_handle = load_kt_consumer.wait_and_advance()
-                ### if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                ###     cute.printf("kt consumer: idx={}", idx)
-                ### kv_tiled_mma = self.exec_mma(
-                ###     tiled_mma=kv_tiled_mma,
-                ###     tCtAcc=tCtAccKV,
-                ###     tCrA=tCrKT,
-                ###     tCrB=tCrV,
-                ###     a_stage_idx=kt_handle.index,
-                ###     b_stage_idx=v_handle.index,
-                ###     acc_stage_idx=0,
-                ###     always_acc=True, # always accumulate states
-                ### )
+                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                    cute.printf("-- begin wait for kt consumer: idx={}", idx)
+                kt_handle = load_kt_consumer.wait_and_advance()
+                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                    cute.printf("kt consumer: idx={}", idx)
+                kv_tiled_mma = self.exec_mma(
+                    tiled_mma=kv_tiled_mma,
+                    tCtAcc=tCtAccKV,
+                    tCrA=tCrKT,
+                    tCrB=tCrV,
+                    a_stage_idx=kt_handle.index,
+                    b_stage_idx=v_handle.index,
+                    acc_stage_idx=0,
+                    always_acc=True, # always accumulate states
+                )
                 
-                ### kt_handle.release()
-                ### if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                ###     cute.printf("after kv mma: idx={}", idx)
-                ### Acquire empty state buffer.
+                kt_handle.release()
+                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                    cute.printf("after kv mma: idx={}", idx)
 
+                # Acquire empty state buffer.
                 # TODO: Produce o_inter = gemm(q, state)
 
                 # Produce o_intra = gemm(p, v)
