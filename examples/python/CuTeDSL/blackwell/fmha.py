@@ -797,8 +797,6 @@ class BlackwellFusedMultiHeadAttentionForward:
         )
         self.cta_sync_barrier.arrive_and_wait()
 
-        cute.printf(f"tidx: {cute.pretty_str(tidx)}")
-
         print(f"sQ: {cute.pretty_str(sQ)}")
         print(f"sK: {cute.pretty_str(sK)}")
         print(f"sV: {cute.pretty_str(sV)}")
@@ -1512,6 +1510,7 @@ class BlackwellFusedMultiHeadAttentionForward:
                         )
                         - 1
                     )
+                    print(f"seqlen_kv_loop_steps={seqlen_kv_loop_steps}")
                     for i in cutlass.range(0, seqlen_kv_loop_steps, 1, unroll=1):
                         # wait for vec0 (row_wise current max & previous max)
                         vec0_handle = s0_corr_consumer.wait_and_advance()

@@ -78,6 +78,8 @@ import cutlass.cute.testing as testing
 from cutlass.cute.runtime import from_dlpack
 from cutlass.cute.typing import Int32, Int64, Float32
 
+PRINT_DEBUG=False
+
 class MaskEnum:
     """Enumeration for different mask types."""
     NONE = 0
@@ -268,6 +270,7 @@ class LinearAttentionChunkwise:
         o_iter: cute.Pointer,
         decay: cute.Pointer,
         problem_size: Tuple[Int32, Int32, Int32, Int32],  # (B, S, H, D)
+        # problem_size: Tuple[int, int, int, int],  # (B, S, H, D)
         stream: cuda.CUstream,
     ):
         """
@@ -283,7 +286,6 @@ class LinearAttentionChunkwise:
             stream: CUDA stream
         """
         B,S,H,D = problem_size
-        self.B, self.S, self.H, self.D = B, S, H, D
 
         # Setup attributes
         self._setup_attributes()
@@ -609,6 +611,7 @@ class LinearAttentionChunkwise:
             v_smem_layout_staged,
             o_smem_layout_staged,
             p_tmem_layout_staged,
+            problem_size,
         ).launch(
             grid=self.grid,
             block=[self.threads_per_cta, 1, 1],
@@ -624,13 +627,13 @@ class LinearAttentionChunkwise:
         kv_tiled_mma: cute.TiledMma,
         pv_tiled_mma: cute.TiledMma,
         tma_atom_q: cute.CopyAtom,
-        mQ_qdl: cute.Tensor,
+        tma_tensor_q: cute.Tensor,
         tma_atom_k: cute.CopyAtom,
-        mK_kdl: cute.Tensor,
+        tma_tensor_k: cute.Tensor,
         tma_atom_kt: cute.CopyAtom,
         mKT_kdl: cute.Tensor,
         tma_atom_v: cute.CopyAtom,
-        mV_dkl: cute.Tensor,
+        tma_tensor_v: cute.Tensor,
         tma_atom_o: cute.CopyAtom,
         mO_qdl: cute.Tensor,
         decay: cute.Pointer,
@@ -640,6 +643,7 @@ class LinearAttentionChunkwise:
         v_smem_layout_staged: cute.ComposedLayout,
         o_smem_layout_staged: cute.ComposedLayout,
         p_tmem_layout_staged: cute.ComposedLayout,
+        problem_size: Tuple[Int32, Int32, Int32, Int32],  # (B, S, H, D)
     ):
         """Kernel for linear attention.
 
@@ -648,9 +652,9 @@ class LinearAttentionChunkwise:
             kv_tiled_mma (cute.TiledMma): kv tiled mma
             pv_tiled_mma (cute.TiledMma): pv tiled mma
             tma_atom_q (cute.CopyAtom): _description_
-            mQ_qdl (cute.Tensor): _description_
+            tma_tensor_q (cute.Tensor): _description_
             tma_atom_k (cute.CopyAtom): _description_
-            mK_kdl (cute.Tensor): _description_
+            tma_tensor_k (cute.Tensor): _description_
             tma_atom_kt (cute.CopyAtom): _description_
             mKT_kdl (cute.Tensor): _description_
             tma_atom_v (cute.CopyAtom): _description_
@@ -801,7 +805,8 @@ class LinearAttentionChunkwise:
         self.num_regs_cuda = 192
 
         (_, hidx, bidx) = cute.arch.block_idx()
-        B, S, H, D, C = self.B, self.S, self.H, self.D, self.chunk_size
+        B, S, H, D = problem_size
+        C = self.chunk_size
 
         # ///////////////////////////////////////////////////////////////////////////////
         # LOAD WARP
@@ -813,7 +818,7 @@ class LinearAttentionChunkwise:
             # ((ATOM_V, REST_V), TILES_N, TILES_K)
             tQsQ, tQgQ = self.tma_partition_for_mma_operand(
                 tma_atom_q,
-                mQ_qdl,
+                tma_tensor_q,
                 sQ,
                 self.qk_mma_tiler,
                 qk_tiled_mma,
@@ -823,7 +828,7 @@ class LinearAttentionChunkwise:
 
             tKsK, tKgK = self.tma_partition_for_mma_operand(
                 tma_atom_k,
-                mK_kdl,
+                tma_tensor_k,
                 sK,
                 self.qk_mma_tiler,
                 qk_tiled_mma,
@@ -843,7 +848,7 @@ class LinearAttentionChunkwise:
 
             tVsV, tVgV = self.tma_partition_for_mma_operand(
                 tma_atom_v,
-                mV_dkl,
+                tma_tensor_v,
                 sV,
                 self.pv_mma_tiler,
                 pv_tiled_mma,
@@ -853,9 +858,9 @@ class LinearAttentionChunkwise:
 
             if bidx == 0 and hidx == 0 and tidx == self.load_warp_id * self.threads_per_warp:
                 cute.printf("tidx: {}", tidx)
-                cute.printf("mQ_qdl: {}", mQ_qdl)
-                cute.printf("mK_kdl: {}", mK_kdl)
-                cute.printf("mV_dkl: {}", mV_dkl)
+                cute.printf("tma_tensor_q: {}", tma_tensor_q)
+                cute.printf("tma_tensor_k: {}", tma_tensor_k)
+                cute.printf("tma_tensor_v: {}", tma_tensor_v)
 
                 cute.printf("tQsQ: {}", tQsQ)
                 cute.printf("tQgQ: {}", tQgQ)
@@ -868,17 +873,17 @@ class LinearAttentionChunkwise:
 
 
             # TODO: Add for loop to load each Qi, Ki, Vi, i for chunk idx
-            for chunk_start in cutlass.range(0, 4096, C, unroll=0):
+            for chunk_start in cutlass.range(0, S, C, unroll=0):
                 # Chunk iterate over TILES_M, TILES_K is 1 in our case since max D is 128
                 idx = chunk_start // C
-                # print(f"S={S}, C={C}, S/C={S/C}, chunk_start={chunk_start}")
 
                 # Qi
                 # SRC: ((ATOM_V, REST_V), TILES_M, TILES_K)
                 # DST: ((ATOM_V, REST_V), INPUT_STAGE)
                 q_handle = load_q_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("q producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("q producer: idx={}", idx)
                 cute.copy(
                     atom=tma_atom_q,
                     src=tQgQ[None, idx, 0], # source
@@ -891,8 +896,9 @@ class LinearAttentionChunkwise:
                 # SRC: ((ATOM_V, REST_V), TILES_N, TILES_K)
                 # DST: ((ATOM_V, REST_V), INPUT_STAGE)
                 k_handle = load_k_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("k producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("k producer: idx={}", idx)
                 cute.copy(
                     atom=tma_atom_k,
                     src=tKgKT[None, idx, 0],
@@ -905,8 +911,9 @@ class LinearAttentionChunkwise:
                 # DST: ((ATOM_V, REST_V), INPUT_STAGE)
                 # TODO: check layout
                 kt_handle = load_kt_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("kt producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("kt producer: idx={}", idx)
                 cute.copy(
                     atom=tma_atom_kt,
                     src=tKgKT[None, idx, 0],
@@ -918,8 +925,9 @@ class LinearAttentionChunkwise:
                 # SRC: ((ATOM_V, REST_V), TILES_M, TILES_K)
                 # DST: ((ATOM_V, REST_V), INPUT_STAGE)
                 v_handle = load_v_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("v producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("v producer: idx={}", idx)
                 cute.copy(
                     atom=tma_atom_v,
                     src=tVgV[None, idx, 0],
@@ -977,22 +985,25 @@ class LinearAttentionChunkwise:
                 self.acc_stage,
             )
 
-            for chunk_start in cutlass.range(0, 4096, C, unroll=0):
+            for chunk_start in cutlass.range(0, S, C, unroll=0):
                 # Process chunk from chunk_start to chunk_start + chunk_size
                 idx = chunk_start // C
 
                 # 1. Wait for Qi.
                 q_handle = load_q_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("q consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("q consumer: idx={}", idx)
                 # 2. Wait for Ki.
                 k_handle = load_k_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("k consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("k consumer: idx={}", idx)
                 # 3. Acquire empty S0 buffer
                 s0_handle = mma_s0_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("s0 producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("s0 producer: idx={}", idx)
                 # 4. GEMM
                 qk_tiled_mma = self.exec_mma(
                     tiled_mma=qk_tiled_mma,
@@ -1003,8 +1014,9 @@ class LinearAttentionChunkwise:
                     b_stage_idx=k_handle.index,
                     acc_stage_idx=s0_handle.index,
                 )
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("after qk mma: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("after qk mma: idx={}", idx)
                 # 5. Release S0.
                 q_handle.release()
                 k_handle.release()
@@ -1013,16 +1025,19 @@ class LinearAttentionChunkwise:
 
                 # Wait for V
                 v_handle = load_v_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("v consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("v consumer: idx={}", idx)
 
                 # Produce new_state
                 # Wait for Ki^T
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("-- begin wait for kt consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("-- begin wait for kt consumer: idx={}", idx)
                 kt_handle = load_kt_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("kt consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("kt consumer: idx={}", idx)
                 kv_tiled_mma = self.exec_mma(
                     tiled_mma=kv_tiled_mma,
                     tCtAcc=tCtAccKV,
@@ -1035,19 +1050,22 @@ class LinearAttentionChunkwise:
                 )
                 
                 kt_handle.release()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("after kv mma: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("after kv mma: idx={}", idx)
 
                 # Acquire empty state buffer.
                 # TODO: Produce o_inter = gemm(q, state)
 
                 # Produce o_intra = gemm(p, v)
                 p_handle = p_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("p consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("p consumer: idx={}", idx)
                 o_intra_handle = o_intra_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("o_intra producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("o_intra producer: idx={}", idx)
 
                 pv_tiled_mma = self.exec_mma(
                     tiled_mma=pv_tiled_mma,
@@ -1059,8 +1077,9 @@ class LinearAttentionChunkwise:
                     acc_stage_idx=o_intra_handle.index,
                 )
 
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
-                    cute.printf("after pv mma: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0:
+                        cute.printf("after pv mma: idx={}", idx)
 
                 p_handle.release()
                 o_intra_handle.commit()
@@ -1078,22 +1097,24 @@ class LinearAttentionChunkwise:
         elif warp_idx in self.cuda_warp_ids:
             cute.arch.warpgroup_reg_alloc(self.num_regs_cuda)
 
-            for chunk_start in cutlass.range(0, 4096, C, unroll=0):
+            for chunk_start in cutlass.range(0, S, C, unroll=0):
 
                 idx = chunk_start // C
 
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
-                    cute.printf("-- begin cuda_warp: idx={}", idx)
-
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
+                        cute.printf("-- begin cuda_warp: idx={}", idx)
 
                 # Wait for qk
                 s0_handle = mma_s0_consumer.wait_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
-                    cute.printf("s0 consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
+                        cute.printf("s0 consumer: idx={}", idx)
                 # Write P=Mask(QK) back to TMEM
                 p_handle = p_producer.acquire_and_advance()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
-                    cute.printf("p producer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
+                        cute.printf("p producer: idx={}", idx)
                 # TODO: impl p
 
                 s0_handle.release()
@@ -1103,8 +1124,9 @@ class LinearAttentionChunkwise:
                 # TODO: o = o_intra + o_inter
                 o_intra_handle = o_intra_consumer.wait_and_advance()
                 o_intra_handle.release()
-                if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
-                    cute.printf("o_intra consumer: idx={}", idx)
+                if cutlass.const_expr(PRINT_DEBUG):
+                    if tidx == warp_idx * 32 and hidx == 0 and bidx == 0 and warp_idx == self.cuda_warp_ids[0]:
+                        cute.printf("o_intra consumer: idx={}", idx)
 
             
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1363,11 +1385,14 @@ def main():
         v_cute.iterator,
         o_cute.iterator,
         decay_cute.iterator,
-        (Int32(B), Int32(S), Int32(H), Int32(D)),
+        # (Int32(B), Int32(S), Int32(H), Int32(D)),
+        (B, S, H, D),
         stream,
     )
     compilation_time = time.time() - start_time
     print(f"Compilation time: {compilation_time:.4f} seconds")
+
+    print(f"B, S, H, D: {(B, S, H, D)}")
 
     # Warmup
     for _ in range(args.warmup_iterations):
@@ -1377,7 +1402,7 @@ def main():
             v_cute.iterator,
             o_cute.iterator,
             decay_cute.iterator,
-            (Int32(B), Int32(S), Int32(H), Int32(D)),
+            (B, S, H, D),
             stream,
         )
     
@@ -1392,7 +1417,7 @@ def main():
             v_cute.iterator,
             o_cute.iterator,
             decay_cute.iterator,
-            (Int32(B), Int32(S), Int32(H), Int32(D)),
+            (B, S, H, D),
             stream,
         )
     
