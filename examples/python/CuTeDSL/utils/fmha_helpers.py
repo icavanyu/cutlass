@@ -945,6 +945,7 @@ class FusedMask:
             else 0
         )
         for i in cutlass.range_constexpr(cute.size(acc_qk)):
+            # print("Applying mask on index:", index_qk[i])
             index_q, index_k = index_transform(*index_qk[i])
             if cutlass.const_expr(
                 window_size_left is not None or window_size_right is not None

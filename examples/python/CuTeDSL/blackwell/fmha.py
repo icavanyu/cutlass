@@ -1699,6 +1699,10 @@ class BlackwellFusedMultiHeadAttentionForward:
         # Wait for Si
         si_handle = mma_si_consumer.wait_and_advance()
         tTMEM_LOADrS = cute.make_rmem_tensor(tTMEM_LOADcS.shape, self.qk_acc_dtype)
+
+        print(f"tTMEM_LOADcS : {tTMEM_LOADcS}")
+        print(f"tTMEM_LOADrS : {tTMEM_LOADrS}")
+
         cute.copy(tiled_tmem_load, tTMEM_LOADtS, tTMEM_LOADrS)
         if need_apply_mask:
             fmha_utils.FusedMask.apply_mask(
