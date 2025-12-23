@@ -1700,9 +1700,6 @@ class BlackwellFusedMultiHeadAttentionForward:
         si_handle = mma_si_consumer.wait_and_advance()
         tTMEM_LOADrS = cute.make_rmem_tensor(tTMEM_LOADcS.shape, self.qk_acc_dtype)
 
-        print(f"tTMEM_LOADcS : {tTMEM_LOADcS}")
-        print(f"tTMEM_LOADrS : {tTMEM_LOADrS}")
-
         cute.copy(tiled_tmem_load, tTMEM_LOADtS, tTMEM_LOADrS)
         if need_apply_mask:
             fmha_utils.FusedMask.apply_mask(
@@ -1750,6 +1747,14 @@ class BlackwellFusedMultiHeadAttentionForward:
         tTMEM_STORErS_x4_e_frg = cute.logical_divide(
             tTMEM_STORErS_x4_e, cute.make_layout(frg_tile)
         )
+
+        print(f"tTMEM_LOADcS : {tTMEM_LOADcS}")
+        print(f"tTMEM_LOADrS : {tTMEM_LOADrS}")
+        print(f"tTMEM_STORErS_x4: {tTMEM_STORErS_x4}")
+        print(f"tTMEM_STORErS_x4_e: {tTMEM_STORErS_x4_e}")
+        print(f"tTMEM_STORErS_x4_e_frg: {tTMEM_STORErS_x4_e_frg}")
+        print(f"tTMEM_LOADrS_frg: {tTMEM_LOADrS_frg}")
+
         for j in range(frg_cnt):
             for k in range(0, cute.size(tTMEM_LOADrS_frg, mode=[0]), 2):
                 tTMEM_LOADrS_frg[k, j], tTMEM_LOADrS_frg[k + 1, j] = (

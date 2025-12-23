@@ -279,7 +279,7 @@ class MixedInputGemmKernel:
         self.is_a_mcast = self.num_mcast_ctas_a > 1
         self.is_b_mcast = self.num_mcast_ctas_b > 1
 
-        if cutlass.const_expr(self.use_tma_store):
+        if False and cutlass.const_expr(self.use_tma_store):
             self.epi_tile = sm100_utils.compute_epilogue_tile_shape(
                 self.cta_tile_shape_mnk,
                 self.use_2cta_instrs,
@@ -1445,6 +1445,12 @@ class MixedInputGemmKernel:
             ) = self.epilog_tmem_copy_and_partition(
                 epi_tidx, tCtAcc_base, tCgC, epi_tile, use_2cta_instrs
             )
+            print(f"tiled_copy_t2r: {tiled_copy_t2r}")
+            print(f"tTR_tAcc_base: {tTR_tAcc_base}")
+            print(f"tTR_rAcc: {tTR_rAcc}")
+            print(f"tCgC: {tCgC}")
+            print(f"epi_tile: {epi_tile}")
+            print(f"----------------------------------------------")
 
             tTR_rC = None
             tiled_copy_r2s = None
@@ -1466,6 +1472,12 @@ class MixedInputGemmKernel:
                 ) = self.epilog_gmem_copy_and_partition(
                     epi_tidx, tma_atom_c, tCgC, epi_tile, sC
                 )
+                print(f"sC: {sC}")
+                print(f"tTR_rC: {tTR_rC}")
+                print(f"tiled_copy_r2s: {tiled_copy_r2s}")
+                print(f"tRS_rC: {tRS_rC}")
+                print(f"tRS_sC: {tRS_sC}")
+                print(f"tiled_copy_t2r: {tiled_copy_t2r}")
             else:
                 (
                     simt_atom,
@@ -1987,6 +1999,9 @@ class MixedInputGemmKernel:
             self.c_layout, self.c_dtype, self.acc_dtype, tiled_copy_t2r
         )
         tiled_copy_r2s = cute.make_tiled_copy_D(copy_atom_r2s, tiled_copy_t2r)
+        print(f"tiled_copy_t2r for P: {tiled_copy_t2r}")
+        print(f"copy_atom_r2s for P: {copy_atom_r2s}")
+        print(f"tiled_copy_r2s for P: {tiled_copy_r2s}")
         # (R2S, R2S_M, R2S_N, PIPE_D)
         thr_copy_r2s = tiled_copy_r2s.get_slice(tidx)
         tRS_sC = thr_copy_r2s.partition_D(sC)
@@ -2050,6 +2065,17 @@ class MixedInputGemmKernel:
         tTR_rAcc = cute.make_rmem_tensor(
             tTR_gC[(None, None, None, 0, 0, 0, 0, 0)].shape, self.acc_dtype
         )
+
+        print(f"----------------------------------------------")
+        print(f"copy_atom_t2r for P: {copy_atom_t2r}")
+        print(f"tiled_copy_t2r for P: {tiled_copy_t2r}")
+        print(f"tAcc_epi for P: {tAcc_epi}")
+        print(f"tTR_tAcc for P: {tTR_tAcc}")
+        print(f"gC_mnl_epi for P: {gC_mnl_epi}")
+        print(f"tTR_gC for P: {tTR_gC}")
+        print(f"tTR_rAcc for P: {tTR_rAcc}")
+        print(f"----------------------------------------------")
+
         return tiled_copy_t2r, tTR_tAcc, tTR_rAcc
 
     @staticmethod
