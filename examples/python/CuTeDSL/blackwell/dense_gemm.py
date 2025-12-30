@@ -267,7 +267,7 @@ class DenseGemmKernel:
         self.is_b_mcast = self.num_mcast_ctas_b > 1
 
         # Compute epilogue subtile
-        if cutlass.const_expr(self.use_tma_store):
+        if False and cutlass.const_expr(self.use_tma_store):
             self.epi_tile = sm100_utils.compute_epilogue_tile_shape(
                 self.cta_tile_shape_mnk,
                 self.use_2cta_instrs,
@@ -276,6 +276,11 @@ class DenseGemmKernel:
             )
         else:
             self.epi_tile = self.cta_tile_shape_mnk[:2]
+
+        print(f"epi_tile: {self.epi_tile}")
+        print(f"epi_tile0: {self.epi_tile[0]}")
+        print(f"epi_tile1: {self.epi_tile[1]}")
+        print(f"mma_tiler: {self.mma_tiler}")
 
         # Setup A/B/C stage count in shared memory
         self.num_acc_stage, self.num_ab_stage, self.num_c_stage = self._compute_stages(
@@ -290,6 +295,10 @@ class DenseGemmKernel:
             self.occupancy,
             self.use_tma_store,
         )
+
+        print(f"num_acc_stage={self.num_acc_stage}")
+        print(f"num_ab_stage={self.num_ab_stage}")
+        print(f"num_c_stage={self.num_c_stage}")
 
         # Compute A/B/C shared memory layout
         self.a_smem_layout_staged = sm100_utils.make_smem_layout_a(
@@ -314,6 +323,14 @@ class DenseGemmKernel:
             if self.use_tma_store
             else None
         )
+
+        print(f"a_smem_layout_staged: {self.a_smem_layout_staged}")
+        print(f"b_smem_layout_staged: {self.b_smem_layout_staged}")
+        print(f"c_smem_layout_staged: {self.c_smem_layout_staged}")
+        print(f"num_acc_stage={self.num_acc_stage}")
+        print(f"num_ab_stage={self.num_ab_stage}")
+        print(f"num_c_stage={self.num_c_stage}")
+
 
         # Compute the number of tensor memory allocation columns
         self.num_tmem_alloc_cols = self._compute_num_tmem_alloc_cols(
@@ -581,7 +598,7 @@ class DenseGemmKernel:
             sC = smem.allocate_tensor(
                 element_type=self.c_dtype,
                 layout=c_smem_layout_staged.outer,
-                byte_alignment=128,
+                byte_alignment=1024,
                 swizzle=c_smem_layout_staged.inner,
             )
 
@@ -683,6 +700,10 @@ class DenseGemmKernel:
         # (MMA, MMA_M, MMA_N)
         tCtAcc_fake = tiled_mma.make_fragment_C(acc_shape)
 
+        print(f"sA: {sA}")
+        print(f"sB: {sB}")
+        print(f"sC: {sC}")
+
         #
         # Cluster wait before tensor memory alloc
         #
@@ -774,6 +795,9 @@ class DenseGemmKernel:
 
                     # tCtAcc += tCrA * tCrB
                     num_kblks = cute.size(tCrA, mode=[2])
+                    print(f"tCrA: {tCrA}")
+                    print(f"tCrB: {tCrB}")
+                    print(f"tCtAcc: {tCtAcc}")
                     for kblk_idx in cutlass.range(num_kblks, unroll_full=True):
                         kblk_crd = (None, None, kblk_idx, consumer_handle.index)
 
@@ -978,6 +1002,13 @@ class DenseGemmKernel:
             tiled_copy_t2r, tTR_rC, epi_tidx, sC
         )
 
+        thr_copy_r2s = tiled_copy_r2s.get_slice(epi_tidx)
+        print(f"thr_copy_r2s: {thr_copy_r2s}")
+        print(f"tTR_tAcc: {tTR_tAcc}")
+        print(f"sC: {sC}")
+        print(f"tRS_rC: {tRS_rC}")
+        print(f"tRS_sC: {tRS_sC}")
+
         # ((ATOM_V, REST_V), EPI_M, EPI_N, RestM, RestN, RestL)
         tCgC_epi = cute.flat_divide(
             tCgC[((None, None), 0, 0, None, None, None)], epi_tile
@@ -1073,6 +1104,9 @@ class DenseGemmKernel:
         tiled_copy_t2r, tTR_tAcc, tTR_rAcc = self.epilog_tmem_copy_and_partition(
             epi_tidx, tCtAcc, tCgC, epi_tile, self.use_2cta_instrs
         )
+        print(f"tiled_copy_t2r: {tiled_copy_t2r}")
+        print(f"epi_tile: {epi_tile}")
+        print(f"tCgC: {tCgC}")
         tTR_tAcc = cute.group_modes(tTR_tAcc, 3, cute.rank(tTR_tAcc))
 
         # ((ATOM_V, REST_V), EPI_M, EPI_N, RestM, RestN, RestL)

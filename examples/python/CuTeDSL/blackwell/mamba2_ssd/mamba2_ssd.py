@@ -3195,6 +3195,9 @@ class SSDKernel:
         tRS_rP = cute.make_rmem_tensor(
             cute.slice_(tRS_sP.shape, (None, None, None, 0)), self.io_dtype
         )
+        print(f"smem_pt p_y: {smem_pt}")
+        print(f"tRS_sP p_y: {tRS_sP}")
+        print(f"tRS_rP p_y: {tRS_rP}")
         return tiled_r2s_p, tRS_rP, tRS_sP
 
     def pre_inter_make_delta(self, smem_delta, smem_bt_layout):
